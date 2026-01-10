@@ -7,13 +7,18 @@ through the ISODataAdapter compatibility layer.
 
 from pathlib import Path
 from typing import Optional
-import matplotlib
-matplotlib.use('Agg')  # Non-interactive backend for server use
 import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 from adapters.nyiso_compat import ISODataAdapter, create_iso_data_adapter
 from analytics.iso_stat import ISOStat
+
+# Set non-interactive backend if needed (for server environments)
+try:
+    import matplotlib
+    matplotlib.use('Agg')  # Non-interactive backend for server use
+except ImportError:
+    pass  # matplotlib not installed or already configured
 
 # Try to import NYISOVis for reference (we'll create our own methods)
 try:
@@ -183,13 +188,22 @@ class ISOVis:
         # Create figure
         fig, ax = plt.subplots(figsize=figsize)
         
+        # Determine metric name from first column (if available)
+        metric = 'Price ($/MWh)'  # Default
+        if len(df.columns) > 0:
+            first_col = df.columns[0]
+            if isinstance(first_col, tuple):
+                metric = first_col[0]  # Get metric from MultiIndex
+            else:
+                metric = 'Price'
+        
         # Plot time series for each zone
         for col in df.columns:
             if isinstance(col, tuple):
-                metric, zone = col
+                metric_name, zone = col
             else:
                 zone = col
-                metric = 'Price'
+                metric_name = 'Price'
             
             zone_data = df[col].dropna()
             
