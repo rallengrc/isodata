@@ -5,7 +5,7 @@ These schemas normalize data from all ISOs into a unified format.
 """
 
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 from enum import Enum
 from pydantic import BaseModel, Field
 
@@ -51,11 +51,40 @@ class MarketPriceFact(BaseModel):
     product: Product = Field(..., description="Market product")
     node_id: str = Field(..., description="Node/zone identifier")
     node_type: NodeType = Field(..., description="Type of node")
-    zone: Optional[str] = Field(None, description="Zone name if applicable")
-    start_time: datetime = Field(..., description="Period start time")
-    end_time: datetime = Field(..., description="Period end time")
+    zone: Optional[str] = Field(None, description="Zone name if applicable (normalized)")
+    
+    # Temporal fields - full precision (preserved from source)
+    start_time: datetime = Field(..., description="Period start time (exact timestamp)")
+    end_time: datetime = Field(..., description="Period end time (exact timestamp)")
+    
+    # Temporal fields - month-level aggregation (YYYYMM strings)
+    auction_month: str = Field(..., description="Auction/market clearing month (YYYYMM format, e.g., '202401')")
+    delivery_month: str = Field(..., description="Delivery/application month (YYYYMM format, e.g., '202401')")
+    
+    # Capacity market specific
+    capability_period: Optional[str] = Field(None, description="SUMMER or WINTER for capacity markets")
+    auction_type: Optional[str] = Field(None, description="MONTHLY, STRIP, or SPOT for capacity markets")
+    
+    # Price and unit
     price: float = Field(..., description="Price value")
     unit: str = Field(..., description="Price unit ($/MWh, $/kW-month, etc.)")
+    
+    # Capacity market specific - cleared quantities
+    awarded_mw: Optional[float] = Field(None, description="Awarded/cleared quantity in MW (for capacity markets)")
+    
+    # Capacity market specific - auction metadata
+    posted_at: Optional[datetime] = Field(None, description="When auction results were posted/published")
+    season_id: Optional[str] = Field(None, description="NYISO season/capability period ID (e.g., '702409')")
+    
+    # Zone normalization tracking
+    zone_normalized: Optional[str] = Field(None, description="Normalized zone name")
+    zone_original: Optional[str] = Field(None, description="Original zone name from source")
+    
+    # Data quality tracking
+    data_quality_score: Optional[float] = Field(None, description="Data quality score 0-1")
+    validation_errors: Optional[List[str]] = Field(None, description="Validation errors if any")
+    
+    # Metadata
     auction_id: Optional[str] = Field(None, description="Auction identifier if applicable")
     source_url: Optional[str] = Field(None, description="Source URL")
     ingested_at: datetime = Field(default_factory=datetime.utcnow, description="Ingestion timestamp")

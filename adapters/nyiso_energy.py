@@ -143,6 +143,61 @@ class NYISOEnergyAdapter(ISOAdapter):
         
         return facts
     
+    def fetch_energy_prices_raw(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        nodes: Optional[List[str]] = None,
+        product: str = "DA",
+    ) -> pd.DataFrame:
+        """
+        Fetch raw NYISO energy prices as DataFrame (before normalization).
+        
+        Returns:
+            DataFrame with MultiIndex columns: ('LBMP ($/MWHr)', 'ZONE_NAME')
+        """
+        # Determine dataset based on product
+        if product.upper() in ("DA", "DAY_AHEAD", "DAM"):
+            dataset = "lbmp_dam_h"
+        else:
+            dataset = "lbmp_rt_5m"
+        
+        dfs = []
+        current_year = start_date.year
+        end_year = end_date.year
+        
+        while current_year <= end_year:
+            try:
+                nyiso_data = NYISOData(dataset=dataset, year=current_year)
+                df = nyiso_data.df
+                
+                if df is not None and not df.empty:
+                    # Filter by date range - make local copies for this iteration
+                    start_dt = start_date
+                    end_dt = end_date
+                    
+                    if df.index.tz is not None:
+                        # Ensure dates are timezone-aware and in same timezone as DataFrame
+                        if start_dt.tzinfo is None:
+                            start_dt = pytz.UTC.localize(start_dt)
+                        if end_dt.tzinfo is None:
+                            end_dt = pytz.UTC.localize(end_dt)
+                        start_dt = start_dt.astimezone(df.index.tz)
+                        end_dt = end_dt.astimezone(df.index.tz)
+                    
+                    df = df[(df.index >= start_dt) & (df.index <= end_dt)]
+                    
+                    if not df.empty:
+                        dfs.append(df)
+            except Exception as e:
+                print(f"Error fetching NYISO raw data for year {current_year}: {e}")
+            
+            current_year += 1
+        
+        if dfs:
+            return pd.concat(dfs).sort_index()
+        return pd.DataFrame()
+    
     def fetch_capacity_prices(
         self,
         start_date: datetime,

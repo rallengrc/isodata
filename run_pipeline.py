@@ -201,10 +201,14 @@ def main():
         if args.iso == "NYISO":
             adapter = NYISOEnergyAdapter()
         elif args.iso == "EIA":
-            adapter = EIAAdapter()
+            print("ERROR: EIA does not provide hourly wholesale electricity prices.")
+            print("       EIA provides demand/generation data, not price data.")
+            print("       Use --iso NYISO (or other ISO adapters) for price data.")
+            return
         else:
             print(f"Unknown ISO: {args.iso}")
-            print("Available ISOs: NYISO, EIA")
+            print("Available ISOs: NYISO")
+            print("Note: EIA removed - does not provide hourly price data")
             return
         
         # Run pipeline

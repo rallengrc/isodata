@@ -1,21 +1,31 @@
 """
-EIA API adapter for cross-ISO energy data.
+EIA API adapter for complementary electricity data (demand, generation, fuel mix).
+
+NOTE: EIA does NOT provide hourly wholesale electricity prices.
+For price data, use direct ISO sources (NYISO, PJM, etc.).
+EIA is kept for complementary data like demand and generation.
 """
 
-from typing import List, Optional
-from datetime import datetime, timedelta
+import os
+from typing import List, Optional, Dict
+from datetime import datetime
 import requests
+import pandas as pd
 from adapters.base import ISOAdapter
 from canonical.schemas import MarketPriceFact
-from canonical.normalize import normalize_energy_price
 
 
 class EIAAdapter(ISOAdapter):
     """
-    EIA API adapter for energy data.
+    EIA API adapter for complementary electricity data.
     
-    EIA provides aggregated hourly electricity operating data from multiple ISOs.
-    This is useful for cross-ISO comparisons and standardized data access.
+    IMPORTANT: EIA does NOT provide hourly wholesale electricity prices.
+    This adapter is kept for future use with complementary data:
+    - System demand/load
+    - Generation by fuel type
+    - Transmission flows
+    
+    For price data, use direct ISO sources (NYISO, PJM, ISO-NE, etc.).
     """
     
     BASE_URL = "https://api.eia.gov/v2/electricity/"
@@ -25,10 +35,13 @@ class EIAAdapter(ISOAdapter):
         Initialize EIA adapter.
         
         Args:
-            api_key: EIA API key (optional but recommended for higher rate limits)
+            api_key: EIA API key (optional, will use EIA_API_KEY env var if not provided)
         """
         super().__init__("EIA")
-        self.api_key = api_key
+        # Use provided API key, or fall back to environment variable
+        self.api_key = api_key or os.getenv("EIA_API_KEY")
+        if not self.api_key:
+            print("Warning: No EIA API key provided. Set EIA_API_KEY environment variable for higher rate limits.")
         self.session = requests.Session()
     
     def _make_request(self, endpoint: str, params: dict) -> dict:
@@ -59,34 +72,24 @@ class EIAAdapter(ISOAdapter):
         product: str = "DA",
     ) -> List[MarketPriceFact]:
         """
-        Fetch energy prices from EIA.
+        EIA does NOT provide hourly wholesale electricity prices.
         
-        Note: EIA doesn't directly provide LMP data in the same format as ISOs.
-        EIA provides hourly operating data, generation, demand, etc.
-        
-        For LMP data, we'll need to use ISO-specific adapters.
-        This adapter can be used for complementary data like:
-        - Hourly generation by fuel type
-        - System demand
-        - Inter-system power flows
+        This method returns an empty list. For price data, use direct ISO sources:
+        - NYISO: Use NYISOEnergyAdapter
+        - PJM: Use PJM adapter (when implemented)
+        - Other ISOs: Use their respective adapters
         
         Args:
-            start_date: Start date/time
-            end_date: End date/time
-            nodes: Not applicable for EIA (aggregated data)
-            product: "DA" or "RT" (EIA provides actuals, not market prices)
+            start_date: Start date/time (not used)
+            end_date: End date/time (not used)
+            nodes: Not applicable
+            product: Not applicable
         
         Returns:
-            List of normalized MarketPriceFact objects (empty for now)
+            Empty list (EIA doesn't provide price data)
         """
-        # EIA doesn't provide LMP data directly
-        # This adapter is reserved for future use with EIA's other datasets
-        # For now, return empty list
-        # In future phases, we can add:
-        # - Generation by fuel type
-        # - System demand
-        # - Inter-system flows
-        
+        print("WARNING: EIA does not provide hourly wholesale electricity prices.")
+        print("         Use direct ISO sources (NYISO, PJM, etc.) for price data.")
         return []
     
     def fetch_capacity_prices(
@@ -119,12 +122,37 @@ class EIAAdapter(ISOAdapter):
         
         return regions
     
+    def fetch_demand(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        region: str = "NYISO",
+    ) -> pd.DataFrame:
+        """
+        Fetch hourly demand/load data from EIA.
+        
+        This is complementary data (not prices).
+        EIA provides system-wide demand in megawatthours.
+        
+        Args:
+            start_date: Start date/time
+            end_date: End date/time
+            region: Region identifier (NYISO, PJM, etc.)
+        
+        Returns:
+            DataFrame with demand data
+        """
+        # Placeholder for future implementation
+        # EIA API endpoint: /rto/region-data/data/
+        # Use facets[type][]="D" for day-ahead demand
+        return pd.DataFrame()
+    
     def fetch_hourly_generation(
         self,
         start_date: datetime,
         end_date: datetime,
         region: str = "NYISO",
-    ) -> dict:
+    ) -> Dict:
         """
         Fetch hourly generation data from EIA.
         
@@ -134,7 +162,7 @@ class EIAAdapter(ISOAdapter):
         Args:
             start_date: Start date/time
             end_date: End date/time
-            region: Region identifier
+            region: Region identifier (NYISO, PJM, etc.)
         
         Returns:
             Dictionary with generation data

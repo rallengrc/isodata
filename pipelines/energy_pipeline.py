@@ -60,15 +60,34 @@ def run_energy_pipeline(
         
         print(f"Fetched {len(facts)} price records")
         
-        # Write to Parquet
-        parquet_writer = ParquetWriter(DIRS["parquet"])
-        written_files = parquet_writer.write_facts(
+        # Write to Parquet (with validation)
+        parquet_writer = ParquetWriter(DIRS["parquet"], validate=True)
+        write_result = parquet_writer.write_facts(
             facts=facts,
             iso_code=iso_code,
             market_type="ENERGY",
         )
         
-        print(f"Wrote {len(written_files)} Parquet files")
+        written_files = write_result['files']
+        rows_written = write_result['rows_written']
+        errors = write_result['errors']
+        warnings = write_result['warnings']
+        
+        print(f"Wrote {len(written_files)} Parquet files ({rows_written} rows)")
+        
+        if errors:
+            print(f"⚠ Validation errors: {len(errors)}")
+            for error in errors[:5]:  # Show first 5 errors
+                print(f"  - {error}")
+            if len(errors) > 5:
+                print(f"  ... and {len(errors) - 5} more errors")
+        
+        if warnings:
+            print(f"ℹ Validation warnings: {len(warnings)}")
+            for warning in warnings[:5]:  # Show first 5 warnings
+                print(f"  - {warning}")
+            if len(warnings) > 5:
+                print(f"  ... and {len(warnings) - 5} more warnings")
         
         # Refresh DuckDB views
         duckdb_views = DuckDBViews(DUCKDB_DB, DIRS["parquet"])
@@ -88,9 +107,11 @@ def run_energy_pipeline(
         
         return {
             "status": "success",
-            "rows": len(facts),
+            "rows": rows_written,
             "files": len(written_files),
             "duration_seconds": (end_time - start_time).total_seconds(),
+            "validation_errors": len(errors),
+            "validation_warnings": len(warnings),
         }
     
     except Exception as e:

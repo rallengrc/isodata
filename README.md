@@ -44,7 +44,24 @@ source venv/bin/activate  # On Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-4. **Initialize the pipeline**:
+4. **Set environment variables** (optional but recommended):
+```bash
+# EIA API key (for higher rate limits)
+export EIA_API_KEY="your_eia_api_key_here"
+
+# OpenAI API key (for Phase 5 - natural language search)
+export OPENAI_API_KEY="your_openai_api_key_here"
+```
+
+   On Windows (Git Bash):
+```bash
+export EIA_API_KEY="your_eia_api_key_here"
+export OPENAI_API_KEY="your_openai_api_key_here"
+```
+
+   Get an EIA API key: https://www.eia.gov/opendata/register.php
+
+5. **Initialize the pipeline**:
 ```bash
 python run_pipeline.py --init
 ```
@@ -204,8 +221,7 @@ python C:\path\to\pipeline\run_pipeline.py --energy --iso NYISO --product DA
 ## Supported ISOs
 
 Currently implemented:
-- **NYISO**: Energy prices via NYISOToolkit
-- **EIA**: Adapter structure (ready for future expansion)
+- **NYISO**: Energy prices via NYISOToolkit ✅
 
 Planned:
 - PJM
@@ -214,6 +230,10 @@ Planned:
 - CAISO
 - ERCOT
 - SPP
+
+**Note on EIA**: EIA does NOT provide hourly wholesale electricity prices. 
+EIA is kept for potential future use with complementary data (demand, generation, fuel mix).
+For price data, always use direct ISO sources.
 
 ## Dependencies
 
