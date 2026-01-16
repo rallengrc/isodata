@@ -98,20 +98,52 @@ class NYISOCapacityAdapter(ISOAdapter):
         
         # Fetch monthly auctions
         if auction_type is None or auction_type.upper() == "MONTHLY":
-            # For each delivery month, fetch the auction that covers it
-            # In NYISO, the auction_month is typically the same as the first delivery month
-            # in a capability period, or the month being auctioned
-            auction_months_to_fetch = set()
+            # IMPORTANT: One auction can cover multiple delivery months in a capability period.
+            # We need to group delivery months by capability period and find the auction_month
+            # that covers them. Typically, the auction_month is the first month of the capability period.
+            
+            # Group delivery months by capability period
+            capability_period_auctions = {}  # {(capability_period, start_year): [delivery_months]}
             
             for delivery_month in sorted(delivery_months_needed):
-                # The auction_month is typically the same as delivery_month for monthly auctions
-                # But we need to be smarter - one auction can cover multiple months
-                # For now, try the delivery month itself
-                auction_months_to_fetch.add(delivery_month)
+                period = get_capability_period(delivery_month)
+                if period:
+                    # Determine the auction month (typically first month of capability period)
+                    year = int(delivery_month[:4])
+                    month_num = int(delivery_month[4:6])
+                    
+                    if period == "WINTER":
+                        # Winter: Nov-Apr, auction_month is typically November
+                        if month_num >= 11:
+                            auction_year = year
+                            auction_month = f"{year}11"
+                        else:
+                            # Jan-Apr: auction was in previous year's November
+                            auction_year = year - 1
+                            auction_month = f"{year - 1}11"
+                    else:  # SUMMER
+                        # Summer: May-Oct, auction_month is typically May
+                        auction_year = year
+                        auction_month = f"{year}05"
+                    
+                    # Group by (period, auction_year) to avoid duplicate fetches
+                    key = (period, auction_year)
+                    if key not in capability_period_auctions:
+                        capability_period_auctions[key] = {
+                            'auction_month': auction_month,
+                            'delivery_months': []
+                        }
+                    capability_period_auctions[key]['delivery_months'].append(delivery_month)
             
-            for auction_month in sorted(auction_months_to_fetch):
-                monthly_facts = self._fetch_monthly_auction(auction_month, season_id=None, nodes=nodes)
-                facts.extend(monthly_facts)
+            # Fetch each unique auction (one auction can cover multiple delivery months)
+            fetched_auctions = set()
+            for key, info in capability_period_auctions.items():
+                auction_month = info['auction_month']
+                if auction_month not in fetched_auctions:
+                    print(f"  Fetching auction {auction_month} (covers {len(info['delivery_months'])} delivery months)")
+                    monthly_facts = self._fetch_monthly_auction(auction_month, season_id=None, nodes=nodes)
+                    facts.extend(monthly_facts)
+                    fetched_auctions.add(auction_month)
         
         # Fetch strip auctions (capability periods)
         if auction_type is None or auction_type.upper() == "STRIP":
@@ -166,21 +198,64 @@ class NYISOCapacityAdapter(ISOAdapter):
             month = int(auction_month[4:6])
             month_year_str = f"{month:02d}/{year}"  # Format: "11/2023"
             
-            # URL for monthly auction detail page
+            # Step 1: GET the selection page to extract seasonId if not provided
+            if not season_id:
+                selection_url = f"{self.BASE_URL}/auc_view_monthly_detail.do"
+                selection_response = self.session.get(selection_url, timeout=30)
+                selection_response.raise_for_status()
+                
+                # Extract seasonId from JavaScript in the selection page
+                selection_soup = BeautifulSoup(selection_response.text, 'html.parser')
+                script_tags = selection_soup.find_all('script')
+                for script in script_tags:
+                    if script.string:
+                        # Look for: ICAP.dsTO.seasonId = '702409';
+                        season_match = re.search(r"ICAP\.dsTO\.seasonId\s*=\s*['\"](\d+)['\"]", script.string)
+                        if season_match:
+                            season_id = season_match.group(1)
+                            print(f"  Extracted seasonId from selection page: {season_id}")
+                            break
+                
+                # If still not found, try to find it by matching the auction month
+                # Look for seasonId that matches the auction month in the JavaScript
+                if not season_id:
+                    # Try to find seasonId by looking for the month in the JavaScript
+                    for script in script_tags:
+                        if script.string and month_year_str in script.string:
+                            # Look for seasonId near the month
+                            season_match = re.search(r"ICAP\.dsTO\.seasonId\s*=\s*['\"](\d+)['\"]", script.string)
+                            if season_match:
+                                season_id = season_match.group(1)
+                                print(f"  Extracted seasonId from month match: {season_id}")
+                                break
+            
+            # Step 2: POST to detail page with month and seasonId
             url = f"{self.BASE_URL}/auc_view_monthly_detail.do"
             
-            # POST request with form data
-            # Need to determine season_id if not provided
-            # For now, we'll try to fetch the page and parse the season dropdown
+            # Form data based on the HTML structure
+            # The form needs: month, seasonId (if available), and display button
             form_data = {
                 'month': month_year_str,
+                'display': 'Display',  # The submit button value
             }
             
             if season_id:
                 form_data['seasonId'] = season_id
             
+            print(f"  POSTing to {url} with month={month_year_str}, seasonId={season_id}")
             response = self.session.post(url, data=form_data, timeout=30)
             response.raise_for_status()
+            
+            # Debug: Always save HTML for inspection
+            debug_file = Path(f"debug_icap_{auction_month}.html")
+            debug_file.write_text(response.text, encoding='utf-8')
+            print(f"  Saved HTML response to: {debug_file}")
+            
+            # Check if we got the right page
+            if 'Monthly Auction Summary' not in response.text and 'Monthly Auction Results' not in response.text:
+                print(f"  Warning: Response doesn't contain expected content")
+                print(f"  Response length: {len(response.text)} characters")
+                print(f"  First 500 chars: {response.text[:500]}")
             
             # Parse HTML response
             parsed_data = self._parse_monthly_auction_html(response.text, auction_month)
@@ -536,6 +611,22 @@ class NYISOCapacityAdapter(ISOAdapter):
         # Parse based on Excel structure
         # This will be implemented based on actual Excel format
         return results
+    
+    def fetch_energy_prices(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        nodes: Optional[List[str]] = None,
+        product: str = "DA",
+    ) -> List[MarketPriceFact]:
+        """
+        ICAP adapter does not fetch energy prices.
+        This method is required by the base class but not applicable for capacity markets.
+        
+        Returns:
+            Empty list
+        """
+        return []
     
     def fetch_nodes(self) -> List[dict]:
         """

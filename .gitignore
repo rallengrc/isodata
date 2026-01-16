@@ -218,3 +218,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Debug files (temporary HTML responses from testing)
+debug_icap_*.html
