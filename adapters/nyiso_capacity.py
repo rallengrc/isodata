@@ -442,17 +442,25 @@ class NYISOCapacityAdapter(ISOAdapter):
         
         # Find the main data table
         # Look for table with month headers (Nov, Dec, Jan, etc.)
+        # The data is in a nested table structure, so we need to find the right one
         tables = soup.find_all('table')
         data_table = None
         
         for table in tables:
-            # Check if this table has month headers
-            headers = table.find_all('th')
-            month_headers = [h.get_text(strip=True) for h in headers]
-            # Look for month abbreviations
-            month_abbrevs = ['Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct']
-            if any(month in ' '.join(month_headers) for month in month_abbrevs):
-                data_table = table
+            # Check if this table has month headers in a <th> row
+            # Look for a row with <th> elements containing month abbreviations
+            rows = table.find_all('tr')
+            for row in rows:
+                headers = row.find_all('th')
+                if headers:
+                    month_headers = [h.get_text(strip=True) for h in headers]
+                    month_abbrevs = ['Nov', 'Dec', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct']
+                    # Check if this row has month abbreviations (not just header text)
+                    month_count = sum(1 for h in month_headers for month in month_abbrevs if month in h)
+                    if month_count >= 3:  # At least 3 months found
+                        data_table = table
+                        break
+            if data_table:
                 break
         
         if not data_table:
@@ -461,11 +469,13 @@ class NYISOCapacityAdapter(ISOAdapter):
         
         # Extract delivery month columns
         # Find header row with month names
+        # The header row has structure: [header text (index 0), Nov (index 1), Dec (index 2), ...]
         header_row = None
         for row in data_table.find_all('tr'):
             cells = row.find_all('th')
             if cells:
                 cell_texts = [c.get_text(strip=True) for c in cells]
+                # Check if this row contains month abbreviations (skip index 0 which is header text)
                 if any(month in ' '.join(cell_texts) for month in month_abbrevs):
                     header_row = row
                     break
@@ -486,8 +496,8 @@ class NYISOCapacityAdapter(ISOAdapter):
         }
         
         # Extract column indices and delivery months
-        # Header structure: [empty cell, Nov, Dec, Jan, Feb, Mar, Apr]
-        # Data structure: [label, value1, value2, value3, value4, value5, value6]
+        # Header structure: [header text (index 0), Nov (index 1), Dec (index 2), Jan (index 3), Feb (index 4), Mar (index 5), Apr (index 6)]
+        # Data structure: [label (index 0), Nov value (index 1), Dec value (index 2), ...]
         header_cells = header_row.find_all('th')
         delivery_month_cols = {}  # {column_index: 'YYYYMM'}
         
@@ -507,6 +517,7 @@ class NYISOCapacityAdapter(ISOAdapter):
                         year = auction_year
                     
                     # Column index matches between header and data rows
+                    # Index 0 is header text, months start at index 1
                     delivery_month_cols[idx] = f"{year}{month_num:02d}"
                     break
         
@@ -532,7 +543,7 @@ class NYISOCapacityAdapter(ISOAdapter):
             # Check if this is a zone name row (has colspan="7")
             if cells[0].get('colspan') == '7':
                 zone_name = first_cell_text.strip()
-                # Skip summary rows
+                # Skip summary rows (we'll handle ROS separately)
                 if zone_name and zone_name not in ['Total ROS Awarded (MW)', 'Total Awarded (MW)', 
                                                     'ROS Price Paid By Bidders (Weighted Avg.)']:
                     # Normalize zone name (remove "Locality" suffix if present)
@@ -542,7 +553,65 @@ class NYISOCapacityAdapter(ISOAdapter):
                         if current_zone not in result['zones']:
                             result['zones'][current_zone] = {}
             
+            # SPECIAL CASE: Parse ROS summary rows FIRST (before regular "Awarded (MW)" check)
+            # "Total ROS Awarded (MW)" row - extract awarded_mw for ROS zone
+            # This must be checked BEFORE the regular "Awarded (MW)" condition to avoid false matches
+            if 'Total ROS Awarded (MW)' in first_cell_text and len(cells) >= 7:
+                # Initialize ROS zone if not exists
+                if 'ROS' not in result['zones']:
+                    result['zones']['ROS'] = {}
+                
+                # Parse awarded MW values for ROS
+                # cells[0] = label, cells[1] = Nov, cells[2] = Dec, etc.
+                # delivery_month_cols maps header index to YYYYMM
+                # Note: delivery_month_cols only contains indices 1-6 (months), not 0 (header text)
+                for col_idx, delivery_month in delivery_month_cols.items():
+                    # col_idx is 1-6 (months), which matches cells[1] through cells[6]
+                    if col_idx < len(cells):
+                        cell_text = cells[col_idx].get_text(strip=True)
+                        
+                        if delivery_month not in result['zones']['ROS']:
+                            result['zones']['ROS'][delivery_month] = {}
+                        
+                        try:
+                            value_text = cell_text.replace(',', '').strip()
+                            if value_text and value_text != '-':
+                                value = float(value_text)
+                                result['zones']['ROS'][delivery_month]['awarded_mw'] = value
+                        except (ValueError, AttributeError):
+                            pass
+            
+            # SPECIAL CASE: "ROS Price Paid By Bidders (Weighted Avg.)" row - extract price for ROS zone
+            # This must be checked BEFORE the regular "Price" condition to avoid false matches
+            elif 'ROS Price Paid By Bidders' in first_cell_text or ('ROS Price' in first_cell_text and 'Weighted' in first_cell_text):
+                # Initialize ROS zone if not exists
+                if 'ROS' not in result['zones']:
+                    result['zones']['ROS'] = {}
+                
+                # Parse price values for ROS
+                # Same structure as awarded row
+                for col_idx, delivery_month in delivery_month_cols.items():
+                    # Skip index 0 (header text, not a month)
+                    if col_idx == 0:
+                        continue
+                    # col_idx matches the cell index (1-6 for months)
+                    if col_idx < len(cells):
+                        cell_text = cells[col_idx].get_text(strip=True)
+                        
+                        if delivery_month not in result['zones']['ROS']:
+                            result['zones']['ROS'][delivery_month] = {}
+                        
+                        try:
+                            # Remove $ sign and commas
+                            value_text = cell_text.replace('$', '').replace(',', '').strip()
+                            if value_text and value_text != '-':
+                                value = float(value_text)
+                                result['zones']['ROS'][delivery_month]['price'] = value
+                        except (ValueError, AttributeError):
+                            pass
+            
             # Check if this is an "Awarded (MW)" row (label in first cell, data in subsequent cells)
+            # Must check for regular zones AFTER ROS rows to avoid false matches
             elif 'Awarded (MW)' in first_cell_text and current_zone:
                 # Parse awarded MW values from this row (skip first cell which is the label)
                 for col_idx, delivery_month in delivery_month_cols.items():
@@ -583,6 +652,7 @@ class NYISOCapacityAdapter(ISOAdapter):
                                 result['zones'][current_zone][delivery_month]['price'] = value
                         except (ValueError, AttributeError):
                             pass
+            
             
             i += 1
         

@@ -69,10 +69,17 @@ class ISODataAdapter:
         
         # Dataset type mapping (canonical -> NYISO format)
         self.dataset_map = {
+            # Energy datasets
             'lbmp_dam_h': ('ENERGY', 'ENERGY_DA'),  # NYISO day-ahead
             'lbmp_rt_5m': ('ENERGY', 'ENERGY_RT'),  # NYISO real-time
             'lmp_dam_h': ('ENERGY', 'ENERGY_DA'),   # Other ISOs day-ahead
             'lmp_rt_5m': ('ENERGY', 'ENERGY_RT'),  # Other ISOs real-time
+            # Capacity datasets
+            'capacity_monthly': ('CAPACITY', 'CAPACITY_MONTHLY'),  # Monthly capacity auctions
+            'capacity_strip': ('CAPACITY', 'CAPACITY_SEASONAL'),  # Strip/seasonal capacity auctions
+            'icap_monthly': ('CAPACITY', 'CAPACITY_MONTHLY'),  # Alias for capacity_monthly
+            'icap_strip': ('CAPACITY', 'CAPACITY_SEASONAL'),  # Alias for capacity_strip
+            # Other datasets
             'load_5m': ('LOAD', None),              # Load data
             'fuel_mix_5m': ('FUEL_MIX', None),      # Fuel mix
         }
@@ -146,24 +153,43 @@ class ISODataAdapter:
         try:
             con = duckdb.connect(str(self.duckdb_path))
             
-            # Build query
-            query = f"""
-            SELECT 
-                iso_code,
-                node_id,
-                zone,
-                start_time,
-                price
-            FROM market_prices
-            WHERE iso_code = '{self.iso_code}'
-              AND market_type = '{market_type}'
-              AND EXTRACT(YEAR FROM start_time) = {self.year}
-            """
+            # Build query - different for CAPACITY vs ENERGY
+            if market_type == 'CAPACITY':
+                # For capacity, use delivery_month to filter by year
+                query = f"""
+                SELECT 
+                    iso_code,
+                    node_id,
+                    zone,
+                    delivery_month,
+                    price
+                FROM market_prices
+                WHERE iso_code = '{self.iso_code}'
+                  AND market_type = '{market_type}'
+                  AND delivery_month LIKE '{self.year}%'
+                """
+            else:
+                # For energy, use start_time
+                query = f"""
+                SELECT 
+                    iso_code,
+                    node_id,
+                    zone,
+                    start_time,
+                    price
+                FROM market_prices
+                WHERE iso_code = '{self.iso_code}'
+                  AND market_type = '{market_type}'
+                  AND EXTRACT(YEAR FROM start_time) = {self.year}
+                """
             
             if product:
                 query += f" AND product = '{product}'"
             
-            query += " ORDER BY start_time, zone"
+            if market_type == 'CAPACITY':
+                query += " ORDER BY delivery_month, zone"
+            else:
+                query += " ORDER BY start_time, zone"
             
             df = con.execute(query).df()
             con.close()
@@ -171,8 +197,9 @@ class ISODataAdapter:
             if df.empty:
                 return None
             
-            # Convert start_time to datetime
-            df['start_time'] = pd.to_datetime(df['start_time'])
+            # Convert start_time to datetime for energy, delivery_month stays as string for capacity
+            if market_type != 'CAPACITY' and 'start_time' in df.columns:
+                df['start_time'] = pd.to_datetime(df['start_time'])
             
             return df
             
@@ -188,13 +215,19 @@ class ISODataAdapter:
         """Load data from Parquet files."""
         try:
             # Find Parquet files for this ISO/year
-            parquet_path = self.parquet_base / self.iso_code / market_type / self.year
-            
-            if not parquet_path.exists():
-                return None
-            
-            # Load all Parquet files for this year
-            parquet_files = list(parquet_path.glob("**/*.parquet"))
+            # For capacity, we need to search across all months since delivery_month spans years
+            if market_type == 'CAPACITY':
+                # Search in all subdirectories for this ISO/market_type
+                parquet_path = self.parquet_base / self.iso_code / market_type
+                if not parquet_path.exists():
+                    return None
+                # Load all parquet files and filter by delivery_month year
+                parquet_files = list(parquet_path.glob("**/*.parquet"))
+            else:
+                parquet_path = self.parquet_base / self.iso_code / market_type / self.year
+                if not parquet_path.exists():
+                    return None
+                parquet_files = list(parquet_path.glob("**/*.parquet"))
             
             if not parquet_files:
                 return None
@@ -206,6 +239,9 @@ class ISODataAdapter:
                 # Filter by product if specified
                 if product and 'product' in df.columns:
                     df = df[df['product'] == product]
+                # For capacity, filter by delivery_month year
+                if market_type == 'CAPACITY' and 'delivery_month' in df.columns:
+                    df = df[df['delivery_month'].str.startswith(self.year)]
                 dfs.append(df)
             
             if not dfs:
@@ -213,7 +249,7 @@ class ISODataAdapter:
             
             df = pd.concat(dfs, ignore_index=True)
             
-            # Ensure start_time is datetime
+            # Ensure start_time is datetime (for energy)
             if 'start_time' in df.columns:
                 df['start_time'] = pd.to_datetime(df['start_time'])
             
@@ -235,10 +271,19 @@ class ISODataAdapter:
         - Index: DatetimeIndex (timezone-aware, UTC or US/Eastern)
         - Columns: MultiIndex [('Metric Name', 'Zone Name')]
         - Wide format: one row per timestamp, one column per zone
+        
+        For CAPACITY market type:
+        - Uses delivery_month as time index (first day of month)
+        - Creates monthly time series compatible with NYISOToolkit
         """
         if df is None or df.empty:
             return pd.DataFrame()
         
+        # Special handling for CAPACITY market type
+        if market_type == 'CAPACITY':
+            return self._transform_capacity_to_nyiso_format(df)
+        
+        # Standard transformation for ENERGY and other market types
         # Determine metric name based on dataset type
         metric_name = self._get_metric_name(market_type)
         
@@ -276,6 +321,65 @@ class ISODataAdapter:
         
         # Convert to US/Eastern (NYISO standard)
         pivot_df.index = pivot_df.index.tz_convert('US/Eastern')
+        
+        # Create MultiIndex columns
+        multi_cols = pd.MultiIndex.from_tuples(
+            [(metric_name, zone) for zone in pivot_df.columns],
+            names=['Metric', 'Zone']
+        )
+        pivot_df.columns = multi_cols
+        
+        # Sort by time
+        pivot_df = pivot_df.sort_index()
+        
+        return pivot_df
+    
+    def _transform_capacity_to_nyiso_format(self, df: pd.DataFrame) -> pd.DataFrame:
+        """
+        Transform ICAP capacity data to NYISO format.
+        
+        Uses delivery_month as time index (first day of month) to create
+        monthly time series compatible with NYISOToolkit visualizations.
+        
+        Args:
+            df: DataFrame with capacity data (must have delivery_month column)
+        
+        Returns:
+            DataFrame in NYISO format with monthly time series
+        """
+        if df is None or df.empty:
+            return pd.DataFrame()
+        
+        # Ensure we have required columns
+        required_cols = ['delivery_month', 'zone', 'price']
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns for capacity data: {missing}")
+        
+        # Use zone if available, otherwise node_id
+        if 'zone' in df.columns and df['zone'].notna().any():
+            zone_col = 'zone'
+        elif 'node_id' in df.columns:
+            zone_col = 'node_id'
+        else:
+            raise ValueError("No zone or node_id column found for capacity data")
+        
+        # Convert delivery_month (YYYYMM string) to datetime (first day of month)
+        df['delivery_datetime'] = pd.to_datetime(df['delivery_month'], format='%Y%m')
+        
+        # Create pivot table: delivery_datetime x zones → price
+        pivot_df = df.pivot_table(
+            index='delivery_datetime',
+            columns=zone_col,
+            values='price',
+            aggfunc='mean'  # In case of duplicates (shouldn't happen, but safe)
+        )
+        
+        # Set timezone to US/Eastern (NYISO standard)
+        pivot_df.index = pivot_df.index.tz_localize('US/Eastern')
+        
+        # Determine metric name
+        metric_name = self._get_metric_name('CAPACITY')
         
         # Create MultiIndex columns
         multi_cols = pd.MultiIndex.from_tuples(
