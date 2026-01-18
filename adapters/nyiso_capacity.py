@@ -333,25 +333,168 @@ class NYISOCapacityAdapter(ISOAdapter):
         - Summer: May-Oct
         - Winter: Nov-Apr (crosses year boundary)
         
+        IMPORTANT: Strip auctions have a different structure than monthly:
+        - One price per zone for the ENTIRE capability period
+        - We create one record per delivery month using the same price/awarded_mw
+        - ROS data is formatted differently (summary rows at bottom)
+        
         Args:
             year: Year (e.g., "2024")
             capability_period: "SUMMER" or "WINTER"
             nodes: Optional list of zones to fetch
         
         Returns:
-            List of MarketPriceFact objects (one per delivery month in period)
+            List of MarketPriceFact objects (one per delivery month in period per zone)
         """
         facts = []
         
         try:
-            # URL for strip auction selection
-            url = f"{self.BASE_URL}/auc_view_strip_selection.do"
+            # Step 1: GET the selection page to extract seasonId
+            selection_url = f"{self.BASE_URL}/auc_view_strip_selection.do"
+            selection_response = self.session.get(selection_url, timeout=30)
+            selection_response.raise_for_status()
             
-            # For now, return empty list - will implement scraping in next step
-            print(f"  Strip auction for {year} {capability_period}: Not yet implemented (scraping required)")
+            # Extract seasonId from JavaScript in the selection page
+            selection_soup = BeautifulSoup(selection_response.text, 'html.parser')
+            script_tags = selection_soup.find_all('script')
+            season_id = None
+            
+            for script in script_tags:
+                if script.string:
+                    # Look for: ICAP.dsTO.seasonId = '702409';
+                    season_match = re.search(r"ICAP\.dsTO\.seasonId\s*=\s*['\"](\d+)['\"]", script.string)
+                    if season_match:
+                        season_id = season_match.group(1)
+                        print(f"  Extracted seasonId from strip selection page: {season_id}")
+                        break
+            
+            if not season_id:
+                print(f"  Warning: Could not extract seasonId for strip auction {year} {capability_period}")
+                return facts
+            
+            # Step 2: POST to detail page with seasonId and capability period
+            # Format capability period for form (e.g., "Winter 2023-2024")
+            if capability_period == "WINTER":
+                # Winter: Nov-Apr crosses year boundary
+                # For year 2023, it's "Winter 2023-2024"
+                season_str = f"Winter {year}-{int(year)+1}"
+            else:  # SUMMER
+                # Summer: May-Oct within same year
+                season_str = f"Summer {year}"
+            
+            url = f"{self.BASE_URL}/auc_view_strip_detail.do"
+            
+            # Form data - strip auctions need seasonId and season selection
+            form_data = {
+                'seasonId': season_id,
+                'season': season_str,  # e.g., "Winter 2023-2024"
+                'display': 'Display',
+            }
+            
+            print(f"  POSTing to {url} with seasonId={season_id}, season={season_str}")
+            response = self.session.post(url, data=form_data, timeout=30)
+            response.raise_for_status()
+            
+            # Debug: Save HTML for inspection
+            debug_file = Path(f"debug_icap_strip_{year}_{capability_period}.html")
+            debug_file.write_text(response.text, encoding='utf-8')
+            print(f"  Saved HTML response to: {debug_file}")
+            
+            # Check if we got the right page
+            if 'Strip Auction Summary' not in response.text and 'Strip Auction Results' not in response.text:
+                print(f"  Warning: Response doesn't contain expected content")
+                print(f"  Response length: {len(response.text)} characters")
+            
+            # Parse HTML response
+            parsed_data = self._parse_strip_auction_html(response.text, year, capability_period)
+            
+            if not parsed_data:
+                print(f"  No data found for strip auction {year} {capability_period}")
+                return facts
+            
+            # Get all delivery months for this capability period
+            # For strip auctions, we need to determine the auction month
+            # Typically strip auctions run before the capability period starts
+            # For Winter 2023-2024, auction might be in Oct 2023 (202310)
+            # For Summer 2024, auction might be in Apr 2024 (202404)
+            if capability_period == "WINTER":
+                # Winter strip auction typically runs in October before the period
+                auction_year = int(year)
+                auction_month = f"{auction_year}10"  # October
+            else:  # SUMMER
+                # Summer strip auction typically runs in April before the period
+                auction_month = f"{year}04"  # April
+            
+            # Get delivery months for the capability period (for calculating time range)
+            delivery_months = get_delivery_months_for_strip(auction_month, capability_period)
+            
+            # Strip auctions: ONE record per zone (not per delivery month)
+            # The price applies to ALL delivery months in the capability period
+            # We use auction_month as delivery_month so all records go into one partition/file
+            for zone_name, zone_data in parsed_data['zones'].items():
+                # Filter by nodes if specified
+                if nodes and zone_name not in nodes:
+                    continue
+                
+                # Strip auctions have a single price/awarded_mw per zone (not per delivery month)
+                price = zone_data.get('price')
+                awarded_mw = zone_data.get('awarded_mw')
+                
+                # Skip if no price (0.00 or missing)
+                if not price or price == 0.0:
+                    continue
+                
+                # For strip auctions, use auction_month as delivery_month
+                # This ensures all records go into one file (partitioned by auction_month)
+                # The capability_period field indicates which months this price applies to
+                delivery_month = auction_month
+                
+                # Calculate start_time and end_time for the capability period
+                # Start: first delivery month of the period
+                # End: last delivery month of the period
+                delivery_months = get_delivery_months_for_strip(auction_month, capability_period)
+                first_delivery = yyyymm_to_datetime(delivery_months[0], tz=pytz.UTC)
+                last_delivery = yyyymm_to_datetime(delivery_months[-1], tz=pytz.UTC)
+                
+                # Start of first delivery month
+                start_time = first_delivery.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                # End of last delivery month
+                if last_delivery.month == 12:
+                    end_time = last_delivery.replace(year=last_delivery.year + 1, month=1, day=1) - timedelta(seconds=1)
+                else:
+                    end_time = last_delivery.replace(month=last_delivery.month + 1, day=1) - timedelta(seconds=1)
+                
+                fact = normalize_capacity_price(
+                    iso_code=self.iso_code,
+                    node_id=zone_name,
+                    node_type="ZONE",
+                    start_time=start_time,
+                    end_time=end_time,
+                    price=price,
+                    product="STRIP",
+                    zone=zone_name,
+                    auction_id=f"{auction_month}_STRIP_{zone_name}",
+                    source_url=url,
+                    auction_time=None,
+                    capability_period=capability_period,
+                    auction_type="STRIP",
+                    awarded_mw=awarded_mw,
+                    posted_at=parsed_data.get('posted_at'),
+                    season_id=parsed_data.get('season_id'),
+                )
+                
+                # Set auction_month and delivery_month (same for strip auctions)
+                fact.auction_month = auction_month
+                fact.delivery_month = delivery_month
+                
+                facts.append(fact)
+            
+            print(f"  Fetched {len(facts)} records for strip auction {year} {capability_period} (1 record per zone, applies to {len(delivery_months)} delivery months)")
             
         except Exception as e:
             print(f"Error fetching strip auction for {year} {capability_period}: {e}")
+            import traceback
+            traceback.print_exc()
         
         return facts
     
@@ -653,6 +796,228 @@ class NYISOCapacityAdapter(ISOAdapter):
                         except (ValueError, AttributeError):
                             pass
             
+            
+            i += 1
+        
+        # Validate we got some data
+        if not result['zones']:
+            print("Warning: No zone data extracted from HTML")
+            return None
+        
+        return result
+    
+    def _parse_strip_auction_html(
+        self, 
+        html: str, 
+        year: str,
+        capability_period: str
+    ) -> Optional[Dict]:
+        """
+        Parse HTML from NYISO ICAP strip auction detail page.
+        
+        Strip auctions have a DIFFERENT structure than monthly auctions:
+        - One price per zone for the ENTIRE capability period (not per delivery month)
+        - Structure: Zone name -> "Awarded (MW)" row -> "Price ($/kW - Month)" row
+        - ROS data is at the bottom with different labels:
+          - "Total ROS Awarded (MW)" (single value, not per month)
+          - "ROS Price Paid By Bidders (Weighted Avg.)" (single value)
+        
+        Expected HTML structure:
+        - Header with season name (e.g., "Winter 2023-2024")
+        - Header with "Strip Auction Results for UCAP, Auction Starting 11/2023"
+        - Header with posted date (e.g., "Posted Date: 10/03/2023 10:02 AM")
+        - Table with zone rows (NOT multiple delivery month columns)
+        - Each zone has: "Awarded (MW)" and "Price ($/kW - Month)" rows
+        - Summary rows at bottom: "Total ROS Awarded (MW)", "Total Awarded (MW)", "ROS Price Paid By Bidders (Weighted Avg.)"
+        
+        Args:
+            html: HTML content from strip auction page
+            year: Year as string (e.g., "2023")
+            capability_period: "SUMMER" or "WINTER"
+        
+        Returns:
+            Dictionary with parsed data:
+            {
+                'capability_period': 'WINTER',
+                'season_id': '702409',
+                'posted_at': datetime(...),
+                'zones': {
+                    'NYC': {'price': 12.90, 'awarded_mw': 580.4},
+                    'G-J': {'price': 3.91, 'awarded_mw': 482.0},
+                    'ROS': {'price': 3.829, 'awarded_mw': 1712.0},
+                    ...
+                }
+            }
+        """
+        soup = BeautifulSoup(html, 'html.parser')
+        
+        result = {
+            'capability_period': capability_period,
+            'season_id': None,
+            'posted_at': None,
+            'zones': {},
+        }
+        
+        # Extract season_id from JavaScript (if present)
+        script_tags = soup.find_all('script')
+        for script in script_tags:
+            if script.string:
+                season_match = re.search(r"ICAP\.dsTO\.seasonId\s*=\s*['\"](\d+)['\"]", script.string)
+                if season_match:
+                    result['season_id'] = season_match.group(1)
+                    break
+        
+        # Extract header information
+        # Look for: "Winter 2023-2024 Strip Auction Results for UCAP, Auction Starting 11/2023 Posted Date: 10/03/2023 10:02 AM"
+        header_text = None
+        header_elements = soup.find_all(['th', 'td'], class_='inputLabel')
+        for elem in header_elements:
+            text = elem.get_text(strip=True)
+            if 'Strip Auction Results' in text or 'Strip Auction Summary' in text:
+                header_text = text
+                break
+        
+        if header_text:
+            # Extract capability period (SUMMER or WINTER) - should match input
+            if 'Winter' in header_text:
+                result['capability_period'] = 'WINTER'
+            elif 'Summer' in header_text:
+                result['capability_period'] = 'SUMMER'
+            
+            # Extract posted date
+            posted_match = re.search(r'Posted Date:\s*(\d{1,2})/(\d{1,2})/(\d{4})\s+(\d{1,2}):(\d{2})\s*(AM|PM)', header_text)
+            if posted_match:
+                month, day, year_val, hour, minute, am_pm = posted_match.groups()
+                hour = int(hour)
+                if am_pm.upper() == 'PM' and hour != 12:
+                    hour += 12
+                elif am_pm.upper() == 'AM' and hour == 12:
+                    hour = 0
+                try:
+                    result['posted_at'] = pytz.timezone('US/Eastern').localize(
+                        datetime(int(year_val), int(month), int(day), hour, int(minute))
+                    ).astimezone(pytz.UTC)
+                except Exception as e:
+                    print(f"Warning: Could not parse posted date: {e}")
+        
+        # Find the main data table
+        # Strip auction table structure is simpler - no month columns, just zone rows
+        tables = soup.find_all('table')
+        data_table = None
+        
+        for table in tables:
+            # Look for table with zone names (not month headers)
+            rows = table.find_all('tr')
+            for row in rows:
+                cells = row.find_all(['td', 'th'])
+                if cells:
+                    # Check if this row contains zone-like names (not month abbreviations)
+                    first_cell = cells[0].get_text(strip=True) if cells else ""
+                    # Zone names or "Awarded (MW)" / "Price" labels indicate data table
+                    if any(keyword in first_cell for keyword in ['Locality', 'Awarded (MW)', 'Price ($/kW', 'Total ROS']):
+                        data_table = table
+                        break
+            if data_table:
+                break
+        
+        if not data_table:
+            print("Warning: Could not find data table in HTML")
+            return None
+        
+        # Parse zone data
+        # Structure: Zone name row (colspan) -> "Awarded (MW)" row -> "Price ($/kW - Month)" row
+        # Based on image description: Each zone has Awarded (MW) and Price ($/kW - Month) rows
+        
+        current_zone = None
+        rows = data_table.find_all('tr')
+        i = 0
+        
+        while i < len(rows):
+            row = rows[i]
+            cells = row.find_all(['td', 'th'])
+            if not cells:
+                i += 1
+                continue
+            
+            first_cell_text = cells[0].get_text(strip=True) if cells else ""
+            
+            # Check if this is a zone name row (has colspan or is a zone name)
+            if cells[0].get('colspan'):
+                zone_name = first_cell_text.strip()
+                # Skip summary rows (we'll handle ROS separately)
+                if zone_name and zone_name not in ['Total ROS Awarded (MW)', 'Total Awarded (MW)', 
+                                                    'ROS Price Paid By Bidders (Weighted Avg.)']:
+                    # Normalize zone name (remove "Locality" suffix if present)
+                    zone_name = zone_name.replace(' Locality', '').strip()
+                    if zone_name:  # Make sure we have a valid zone name
+                        current_zone = zone_name
+                        if current_zone not in result['zones']:
+                            result['zones'][current_zone] = {}
+            
+            # SPECIAL CASE: Parse ROS summary rows FIRST (before regular rows)
+            # "Total ROS Awarded (MW)" row - extract awarded_mw for ROS zone
+            # Strip auctions: ROS has a SINGLE value (not per delivery month)
+            if 'Total ROS Awarded (MW)' in first_cell_text:
+                # Initialize ROS zone if not exists
+                if 'ROS' not in result['zones']:
+                    result['zones']['ROS'] = {}
+                
+                # Strip auctions: ROS awarded MW is in the second cell (index 1)
+                if len(cells) >= 2:
+                    cell_text = cells[1].get_text(strip=True)
+                    try:
+                        value_text = cell_text.replace(',', '').strip()
+                        if value_text and value_text != '-':
+                            value = float(value_text)
+                            result['zones']['ROS']['awarded_mw'] = value
+                    except (ValueError, AttributeError):
+                        pass
+            
+            # SPECIAL CASE: "ROS Price Paid By Bidders (Weighted Avg.)" row - extract price for ROS zone
+            # Strip auctions: ROS price is a SINGLE value
+            elif 'ROS Price Paid By Bidders' in first_cell_text or ('ROS Price' in first_cell_text and 'Weighted' in first_cell_text):
+                # Initialize ROS zone if not exists
+                if 'ROS' not in result['zones']:
+                    result['zones']['ROS'] = {}
+                
+                # Strip auctions: ROS price is in the second cell (index 1)
+                if len(cells) >= 2:
+                    cell_text = cells[1].get_text(strip=True)
+                    try:
+                        # Remove $ sign and commas
+                        value_text = cell_text.replace('$', '').replace(',', '').strip()
+                        if value_text and value_text != '-':
+                            value = float(value_text)
+                            result['zones']['ROS']['price'] = value
+                    except (ValueError, AttributeError):
+                        pass
+            
+            # Check if this is an "Awarded (MW)" row for a regular zone
+            elif 'Awarded (MW)' in first_cell_text and current_zone:
+                # Strip auctions: Awarded MW is in the second cell (index 1)
+                if len(cells) >= 2:
+                    cell_text = cells[1].get_text(strip=True)
+                    try:
+                        value_text = cell_text.replace(',', '').strip()
+                        if value_text and value_text != '-':
+                            value = float(value_text)
+                            result['zones'][current_zone]['awarded_mw'] = value
+                    except (ValueError, AttributeError):
+                        pass
+            
+            # Check if this is a "Price ($/kW - Month)" row for a regular zone
+            elif ('Price ($/kW - Month)' in first_cell_text or ('Price' in first_cell_text and '$/kW' in first_cell_text)) and current_zone:
+                # Strip auctions: Price is in the second cell (index 1)
+                if len(cells) >= 2:
+                    cell_text = cells[1].get_text(strip=True)
+                    try:
+                        # Remove $ sign and commas
+                        value_text = cell_text.replace('$', '').replace(',', '').strip()
+                        if value_text and value_text != '-':
+                            value = float(value_text)
+                            result['zones'][current_zone]['price'] = value
+                    except (ValueError, AttributeError):
+                        pass
             
             i += 1
         

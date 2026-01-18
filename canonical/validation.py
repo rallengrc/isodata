@@ -15,12 +15,12 @@ class DataValidator:
         self.errors = []
         self.warnings = []
     
-    def validate_fact(self, fact: MarketPriceFact) -> Tuple[MarketPriceFact, List[str]]:
+    def validate_fact(self, fact: MarketPriceFact) -> Tuple[MarketPriceFact, List[str], List[str]]:
         """
         Validate and clean a MarketPriceFact.
         
         Returns:
-            (cleaned_fact, list_of_errors)
+            (cleaned_fact, list_of_errors, list_of_warnings)
         """
         errors = []
         warnings = []
@@ -50,8 +50,16 @@ class DataValidator:
         if fact.price is None:
             errors.append("Price cannot be None")
         elif isinstance(fact.price, float):
+            # Negative prices are VALID in electricity markets:
+            # - Energy: Excess generation, generators paying to stay online, grid balancing
+            # - Capacity: Rare but possible in edge cases
+            # So we only warn, don't error
             if fact.price < 0:
-                errors.append(f"Price cannot be negative: {fact.price}")
+                if fact.market_type == "ENERGY":
+                    warnings.append(f"Negative energy price: {fact.price} $/MWh (valid but unusual)")
+                else:
+                    warnings.append(f"Negative capacity price: {fact.price} $/kW-month (valid but unusual)")
+            
             # Reasonable upper bounds (can be adjusted)
             if fact.market_type == "ENERGY" and fact.price > 10000:
                 warnings.append(f"Unusually high energy price: {fact.price} $/MWh")
@@ -118,5 +126,5 @@ class DataValidator:
         # Recreate fact with updates
         cleaned_fact = MarketPriceFact(**fact_dict)
         
-        return cleaned_fact, errors
+        return cleaned_fact, errors, warnings
 
