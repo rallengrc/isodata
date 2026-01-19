@@ -95,7 +95,32 @@ python run_pipeline.py --energy --iso NYISO --start-date 2024-01-01 --end-date 2
 python run_pipeline.py --energy --iso NYISO --backfill --start-year 2020 --end-year 2024 --product DA
 ```
 
-### 3. Explore Data in Jupyter
+### 3. Download and Import NYISO ICAP Excel Files
+
+**Download Excel files from NYISO**:
+```bash
+# Download all available ICAP Market Report Excel files
+python scripts/download_nyiso_excel.py
+
+# Download only files from 2024 onwards
+python scripts/download_nyiso_excel.py --start-date 2024-01-01
+
+# Download files for a specific year
+python scripts/download_nyiso_excel.py --start-date 2023-01-01 --end-date 2023-12-31
+```
+
+Files are saved to `data/excel/nyiso/` by default.
+
+**Import downloaded Excel files**:
+```bash
+# Import from Excel file (all auction types)
+python run_pipeline.py --capacity --iso NYISO --excel-file data/excel/nyiso/ICAP-Market-Report-July-2024.xlsx
+
+# Import only specific auction types
+python run_pipeline.py --capacity --iso NYISO --excel-file data/excel/nyiso/ICAP-Market-Report-July-2024.xlsx --excel-auction-types MONTHLY STRIP
+```
+
+### 4. Explore Data in Jupyter
 
 ```bash
 jupyter notebook notebooks/phase2_demo.ipynb
@@ -213,10 +238,17 @@ python C:\path\to\pipeline\run_pipeline.py --energy --iso NYISO --product DA
 ## Phase Status
 
 - ✅ **Phase 1**: Foundation & Storage
-- ✅ **Phase 2**: NYISO Energy Prices (Current)
-- ⏳ **Phase 3**: NYISO ICAP (Capacity Market)
-- ⏳ **Phase 4**: Analytics + Jupyter Frontend
-- ⏳ **Phase 5**: Natural Language Search (Qdrant + OpenAI)
+- ✅ **Phase 2**: NYISO Energy Prices
+- 🔄 **Phase 3**: NYISO ICAP (Capacity Market) - IN PROGRESS
+  - ✅ Monthly auction HTML scraping
+  - ✅ Strip auction HTML scraping
+  - ✅ ROS data parsing
+  - ✅ Excel historical data import
+  - ⏳ Spot auction support (moved to Phase 7 - low priority)
+- ⏳ **Phase 4**: Analytics + Jupyter Frontend + PUDL Integration
+- ⏳ **Phase 5**: Additional ISOs (PJM, ISO-NE, MISO, CAISO, ERCOT, SPP)
+- ⏳ **Phase 6**: Natural Language Search (Qdrant + OpenAI)
+- ⏳ **Phase 7**: Spot Auction Support (low priority - rare events)
 
 ## Supported ISOs
 

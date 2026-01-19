@@ -48,44 +48,61 @@ python run_pipeline.py --energy --iso NYISO --backfill --start-year 2020 --end-y
 
 ### Capacity Market Data (NYISO ICAP)
 
-**⚠️ Note:** Capacity pipeline not yet integrated into `run_pipeline.py`. Use test scripts for now.
-
-#### Using Test Script (Recommended for Testing)
+#### HTML Scraping (Live Data)
 ```bash
-# Test with specific auction month
-python test_icap_simple.py
+# Fetch current capability period (defaults to current Winter/Summer)
+python run_pipeline.py --capacity --iso NYISO --auction-type MONTHLY
 
-# Test with date range (programmatic)
-python test_icap_fetch_capacity.py
+# Fetch specific date range
+python run_pipeline.py --capacity --iso NYISO --start-date 2023-11-01 --end-date 2024-04-30 --auction-type MONTHLY
+
+# Fetch strip auctions
+python run_pipeline.py --capacity --iso NYISO --start-date 2023-11-01 --end-date 2024-04-30 --auction-type STRIP
+
+# Backfill historical data
+python run_pipeline.py --capacity --iso NYISO --backfill --start-year 2020 --auction-type MONTHLY
 ```
 
-#### Programmatic Usage (Python)
-```python
-from adapters.nyiso_capacity import NYISOCapacityAdapter
-from datetime import datetime
-import pytz
+#### Excel Import (Historical Data)
 
-adapter = NYISOCapacityAdapter()
+**Step 1: Download Excel Files from NYISO**
+```bash
+# Download all available ICAP Market Report Excel files
+python scripts/download_nyiso_excel.py
 
-# Fetch Winter 2023-2024 capacity data
-start_date = datetime(2023, 11, 1, tzinfo=pytz.UTC)
-end_date = datetime(2024, 4, 30, tzinfo=pytz.UTC)
+# Download only files from 2024 onwards
+python scripts/download_nyiso_excel.py --start-date 2024-01-01
 
-facts = adapter.fetch_capacity_prices(
-    start_date=start_date,
-    end_date=end_date,
-    nodes=None,  # All zones
-    auction_type="MONTHLY",  # or "STRIP", or None for all
-)
+# Download files for a specific year
+python scripts/download_nyiso_excel.py --start-date 2023-01-01 --end-date 2023-12-31
+
+# Force re-download existing files
+python scripts/download_nyiso_excel.py --force
 ```
 
-**Storage Location (when integrated):**
-- `data/parquet/NYISO/CAPACITY/{year}/{month}/data_{year}_{month}.parquet`
+**Step 2: Import Downloaded Excel Files**
+```bash
+# Import from Excel file (all auction types)
+python run_pipeline.py --capacity --iso NYISO --excel-file data/excel/nyiso/ICAP-Market-Report-July-2024.xlsx
 
-**Auction Types:**
+# Import only specific auction types
+python run_pipeline.py --capacity --iso NYISO --excel-file data/excel/nyiso/ICAP-Market-Report-July-2024.xlsx --excel-auction-types MONTHLY STRIP
+
+# Test Excel import (without writing to Parquet)
+python test_excel_import.py data/excel/nyiso/ICAP-Market-Report-July-2024.xlsx
+```
+
+**Excel File Storage:**
+- Downloaded files are saved to: `data/excel/nyiso/`
+- Files are automatically skipped if they already exist (unless `--force` is used)
+
+**Auction Type Options:**
 - `MONTHLY` - Monthly capacity auctions
-- `STRIP` - Seasonal strip auctions (not yet implemented)
-- `None` - All auction types
+- `STRIP` - Strip/seasonal capacity auctions
+- `SPOT` - Spot auctions (rare, 1-2 times in NYISO history)
+
+**Storage Location:**
+- `data/parquet/NYISO/CAPACITY/{year}/{month}/data_{year}_{month}_{auction_type}.parquet`
 
 ---
 
@@ -284,6 +301,5 @@ con.close()
 
 ## 🚧 Coming Soon
 
-- `python run_pipeline.py --capacity --iso NYISO` (capacity pipeline integration)
-- Strip auction support for ICAP
-- Excel import for historical ICAP data
+- Additional ISO support (PJM, ISO-NE, MISO, CAISO, ERCOT, SPP)
+- Spot auction HTML scraping (deprioritized - rare occurrence)

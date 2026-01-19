@@ -170,6 +170,8 @@ def main():
     
     # Capacity-specific arguments
     parser.add_argument("--auction-type", type=str, choices=["MONTHLY", "STRIP"], help="Auction type (MONTHLY or STRIP) - for capacity pipeline")
+    parser.add_argument("--excel-file", type=str, help="Path to Excel file for capacity data import (alternative to HTML scraping)")
+    parser.add_argument("--excel-auction-types", type=str, nargs="+", choices=["MONTHLY", "STRIP", "SPOT"], help="Auction types to parse from Excel (default: all)")
     
     # Backfill arguments
     parser.add_argument("--backfill", action="store_true", help="Backfill historical data")
@@ -257,8 +259,40 @@ def main():
         return
     
     elif args.capacity:
-        from pipelines.capacity_pipeline import run_capacity_pipeline, backfill_capacity_data
+        from pipelines.capacity_pipeline import run_capacity_pipeline, backfill_capacity_data, import_capacity_from_excel
         from adapters.nyiso_capacity import NYISOCapacityAdapter
+        
+        # Select adapter
+        if args.iso == "NYISO":
+            adapter = NYISOCapacityAdapter()
+        else:
+            print(f"Unknown ISO: {args.iso}")
+            print("Available ISOs: NYISO")
+            return
+        
+        # Excel import mode (alternative to HTML scraping)
+        if args.excel_file:
+            excel_path = Path(args.excel_file)
+            if not excel_path.exists():
+                print(f"Error: Excel file not found: {excel_path}")
+                return
+            
+            auction_types = args.excel_auction_types if args.excel_auction_types else None
+            
+            result = import_capacity_from_excel(
+                adapter=adapter,
+                excel_file_path=excel_path,
+                auction_types=auction_types,
+            )
+            print(f"\nExcel import completed:")
+            print(f"  Status: {result['status']}")
+            print(f"  Rows: {result.get('rows', 0)}")
+            print(f"  Files: {result.get('files', 0)}")
+            if result.get('validation_errors', 0) > 0:
+                print(f"  Validation errors: {result['validation_errors']}")
+            if result.get('validation_warnings', 0) > 0:
+                print(f"  Validation warnings: {result['validation_warnings']}")
+            return
         
         # Set defaults for capacity pipeline (full capability period if not specified)
         if start_date is None or end_date is None:
@@ -276,15 +310,7 @@ def main():
                     start_date = datetime(now.year - 1, 11, 1, tzinfo=pytz.UTC)
                     end_date = datetime(now.year, 4, 30, 23, 59, 59, tzinfo=pytz.UTC)
         
-        # Select adapter
-        if args.iso == "NYISO":
-            adapter = NYISOCapacityAdapter()
-        else:
-            print(f"Unknown ISO: {args.iso}")
-            print("Available ISOs: NYISO")
-            return
-        
-        # Run pipeline
+        # Run pipeline (HTML scraping mode)
         if args.backfill:
             if not args.start_year:
                 print("--start-year required for backfill")

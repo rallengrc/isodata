@@ -1028,24 +1028,832 @@ class NYISOCapacityAdapter(ISOAdapter):
         
         return result
     
-    def _parse_excel_report(self, file_path: Path) -> List[dict]:
+    def _parse_excel_report(
+        self, 
+        file_path: Path,
+        auction_types: Optional[List[str]] = None
+    ) -> List[MarketPriceFact]:
         """
         Parse NYISO ICAP Market Report Excel file.
         
+        Expected Excel structure:
+        - Sheet "MCP Table": Market Clearing Prices by zone and auction type
+        - Sheet "Monthly Auction Details": Detailed monthly auction results
+        - Sheet "Strip Auction Details": Detailed strip auction results
+        - Sheet "Spot Auction Details": Spot auction results (if present, rare)
+        
         Args:
             file_path: Path to Excel file
+            auction_types: Which auction types to parse (None = all: MONTHLY, STRIP, SPOT)
         
         Returns:
-            List of dictionaries with auction data
+            List of MarketPriceFact objects
         """
-        # Read Excel file
-        df = pd.read_excel(file_path, sheet_name=None)  # Read all sheets
+        if not file_path.exists():
+            raise FileNotFoundError(f"Excel file not found: {file_path}")
         
-        results = []
+        facts = []
+        source_url = str(file_path.absolute())  # Store absolute path as source URL
         
-        # Parse based on Excel structure
-        # This will be implemented based on actual Excel format
-        return results
+        try:
+            # Read all sheets
+            excel_file = pd.ExcelFile(file_path)
+            sheet_names = excel_file.sheet_names
+            
+            print(f"  Found {len(sheet_names)} sheets: {', '.join(sheet_names)}")
+            
+            # Parse MCP Table sheet (if present) - contains summary prices
+            if 'MCP Table' in sheet_names or any('MCP' in name for name in sheet_names):
+                mcp_sheet = 'MCP Table' if 'MCP Table' in sheet_names else [n for n in sheet_names if 'MCP' in n][0]
+                print(f"  Parsing MCP Table from sheet: {mcp_sheet}")
+                mcp_facts = self._parse_mcp_table(excel_file, mcp_sheet, auction_types, source_url)
+                facts.extend(mcp_facts)
+            
+            # Parse Monthly Auction Details sheet
+            monthly_sheets = [n for n in sheet_names if 'monthly' in n.lower() or 'monthly' in n.lower()]
+            if monthly_sheets:
+                for sheet_name in monthly_sheets:
+                    print(f"  Parsing Monthly Auction Details from sheet: {sheet_name}")
+                    monthly_facts = self._parse_monthly_details(excel_file, sheet_name, auction_types, source_url)
+                    facts.extend(monthly_facts)
+            
+            # Parse Strip Auction Details sheet
+            strip_sheets = [n for n in sheet_names if 'strip' in n.lower() or 'capability' in n.lower()]
+            if strip_sheets:
+                for sheet_name in strip_sheets:
+                    print(f"  Parsing Strip Auction Details from sheet: {sheet_name}")
+                    strip_facts = self._parse_strip_details(excel_file, sheet_name, auction_types, source_url)
+                    facts.extend(strip_facts)
+            
+            # Parse Spot Auction Details sheet (rare)
+            spot_sheets = [n for n in sheet_names if 'spot' in n.lower()]
+            if spot_sheets:
+                for sheet_name in spot_sheets:
+                    print(f"  Parsing Spot Auction Details from sheet: {sheet_name}")
+                    spot_facts = self._parse_spot_details(excel_file, sheet_name, auction_types, source_url)
+                    facts.extend(spot_facts)
+            
+            # If no specific sheets found, try to parse any sheet that looks like auction data
+            if not facts:
+                print(f"  No standard sheets found, attempting to parse all sheets...")
+                for sheet_name in sheet_names:
+                    if sheet_name.lower() not in ['summary', 'index', 'contents', 'notes']:
+                        try:
+                            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=0)
+                            # Try to detect structure and parse
+                            parsed = self._parse_generic_sheet(df, sheet_name, auction_types, source_url)
+                            if parsed:
+                                facts.extend(parsed)
+                        except Exception as e:
+                            print(f"  Warning: Could not parse sheet '{sheet_name}': {e}")
+            
+            print(f"  Parsed {len(facts)} records from Excel file")
+            
+        except Exception as e:
+            print(f"Error parsing Excel file {file_path}: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        
+        return facts
+    
+    def _parse_mcp_table(
+        self,
+        excel_file: pd.ExcelFile,
+        sheet_name: str,
+        auction_types: Optional[List[str]] = None,
+        source_url: Optional[str] = None
+    ) -> List[MarketPriceFact]:
+        """
+        Parse MCP Table sheet - Market Clearing Prices by zone and auction type.
+        
+        Expected structure:
+        - Columns: Zone/Locality | Monthly | Strip | Spot | Date/Period
+        - Or multi-level headers
+        
+        Args:
+            excel_file: ExcelFile object
+            sheet_name: Name of sheet to parse
+            auction_types: Filter by auction types (None = all)
+        
+        Returns:
+            List of MarketPriceFact objects
+        """
+        facts = []
+        
+        try:
+            # Try reading with multi-level headers first
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=[0, 1])
+            
+            # Flatten multi-level headers if present
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = ['_'.join(col).strip() for col in df.columns.values]
+            
+            # Find zone column (usually first column or contains "Zone", "Locality", etc.)
+            zone_col = None
+            for col in df.columns:
+                if any(keyword in str(col).lower() for keyword in ['zone', 'locality', 'region', 'area']):
+                    zone_col = col
+                    break
+            
+            if zone_col is None:
+                # Assume first column is zone
+                zone_col = df.columns[0]
+            
+            # Find price columns
+            monthly_col = None
+            strip_col = None
+            spot_col = None
+            
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if 'monthly' in col_lower and ('price' in col_lower or 'mcp' in col_lower or '$' in col_lower):
+                    monthly_col = col
+                elif 'strip' in col_lower and ('price' in col_lower or 'mcp' in col_lower or '$' in col_lower):
+                    strip_col = col
+                elif 'spot' in col_lower and ('price' in col_lower or 'mcp' in col_lower or '$' in col_lower):
+                    spot_col = col
+            
+            # Find date/period column
+            date_col = None
+            for col in df.columns:
+                if any(keyword in str(col).lower() for keyword in ['date', 'period', 'month', 'year']):
+                    date_col = col
+                    break
+            
+            # Parse each row
+            for idx, row in df.iterrows():
+                zone_name = str(row[zone_col]).strip() if pd.notna(row[zone_col]) else None
+                if not zone_name or zone_name.lower() in ['nan', 'none', '']:
+                    continue
+                
+                # Determine date/period
+                if date_col and pd.notna(row[date_col]):
+                    period_str = str(row[date_col])
+                    # Try to extract YYYYMM from date
+                    try:
+                        if isinstance(row[date_col], datetime):
+                            delivery_month = datetime_to_yyyymm(row[date_col])
+                        else:
+                            # Try parsing string
+                            dt = pd.to_datetime(period_str)
+                            delivery_month = datetime_to_yyyymm(dt)
+                    except:
+                        # Default to current year/month if can't parse
+                        delivery_month = datetime_to_yyyymm(datetime.now())
+                else:
+                    # No date column - use current month as fallback
+                    delivery_month = datetime_to_yyyymm(datetime.now())
+                
+                # Parse Monthly price
+                if monthly_col and pd.notna(row[monthly_col]):
+                    if auction_types is None or 'MONTHLY' in [a.upper() for a in auction_types]:
+                        try:
+                            price = float(str(row[monthly_col]).replace('$', '').replace(',', '').strip())
+                            if price > 0:
+                                fact = self._create_fact_from_mcp(
+                                    zone_name, delivery_month, price, 'MONTHLY', source_url
+                                )
+                                if fact:
+                                    facts.append(fact)
+                        except (ValueError, AttributeError):
+                            pass
+                
+                # Parse Strip price
+                if strip_col and pd.notna(row[strip_col]):
+                    if auction_types is None or 'STRIP' in [a.upper() for a in auction_types]:
+                        try:
+                            price = float(str(row[strip_col]).replace('$', '').replace(',', '').strip())
+                            if price > 0:
+                                fact = self._create_fact_from_mcp(
+                                    zone_name, delivery_month, price, 'STRIP', source_url
+                                )
+                                if fact:
+                                    facts.append(fact)
+                        except (ValueError, AttributeError):
+                            pass
+                
+                # Parse Spot price (rare)
+                if spot_col and pd.notna(row[spot_col]):
+                    if auction_types is None or 'SPOT' in [a.upper() for a in auction_types]:
+                        try:
+                            price = float(str(row[spot_col]).replace('$', '').replace(',', '').strip())
+                            if price > 0:
+                                fact = self._create_fact_from_mcp(
+                                    zone_name, delivery_month, price, 'SPOT', source_url
+                                )
+                                if fact:
+                                    facts.append(fact)
+                        except (ValueError, AttributeError):
+                            pass
+        
+        except Exception as e:
+            print(f"  Warning: Error parsing MCP Table sheet: {e}")
+        
+        return facts
+    
+    def _parse_monthly_details(
+        self,
+        excel_file: pd.ExcelFile,
+        sheet_name: str,
+        auction_types: Optional[List[str]] = None,
+        source_url: Optional[str] = None
+    ) -> List[MarketPriceFact]:
+        """
+        Parse Monthly Auction Details sheet.
+        
+        Expected structure:
+        - Columns: Auction Month | Delivery Month | Zone | Price | Awarded MW | ...
+        
+        Args:
+            excel_file: ExcelFile object
+            sheet_name: Name of sheet to parse
+            auction_types: Filter by auction types (None = all)
+        
+        Returns:
+            List of MarketPriceFact objects
+        """
+        facts = []
+        
+        if auction_types and 'MONTHLY' not in [a.upper() for a in auction_types]:
+            return facts
+        
+        try:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=0)
+            
+            # Find column indices
+            auction_month_col = None
+            delivery_month_col = None
+            zone_col = None
+            price_col = None
+            awarded_col = None
+            
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if 'auction' in col_lower and 'month' in col_lower:
+                    auction_month_col = col
+                elif 'delivery' in col_lower and 'month' in col_lower:
+                    delivery_month_col = col
+                elif any(keyword in col_lower for keyword in ['zone', 'locality', 'region']):
+                    zone_col = col
+                elif 'price' in col_lower or 'mcp' in col_lower:
+                    price_col = col
+                elif 'awarded' in col_lower or 'cleared' in col_lower or 'mw' in col_lower:
+                    awarded_col = col
+            
+            # Parse each row
+            for idx, row in df.iterrows():
+                try:
+                    # Extract auction month
+                    if auction_month_col and pd.notna(row[auction_month_col]):
+                        auction_month = self._parse_date_to_yyyymm(row[auction_month_col])
+                    else:
+                        continue  # Skip if no auction month
+                    
+                    # Extract delivery month
+                    if delivery_month_col and pd.notna(row[delivery_month_col]):
+                        delivery_month = self._parse_date_to_yyyymm(row[delivery_month_col])
+                    else:
+                        delivery_month = auction_month  # Default to auction month
+                    
+                    # Extract zone
+                    if zone_col and pd.notna(row[zone_col]):
+                        zone_name = str(row[zone_col]).strip()
+                    else:
+                        continue  # Skip if no zone
+                    
+                    # Extract price
+                    if price_col and pd.notna(row[price_col]):
+                        price = float(str(row[price_col]).replace('$', '').replace(',', '').strip())
+                    else:
+                        continue  # Skip if no price
+                    
+                    # Extract awarded MW (optional)
+                    awarded_mw = None
+                    if awarded_col and pd.notna(row[awarded_col]):
+                        try:
+                            awarded_mw = float(str(row[awarded_col]).replace(',', '').strip())
+                        except:
+                            pass
+                    
+                    # Create fact
+                    fact = self._create_monthly_fact(
+                        zone_name, auction_month, delivery_month, price, awarded_mw, source_url
+                    )
+                    if fact:
+                        facts.append(fact)
+                
+                except Exception as e:
+                    print(f"  Warning: Error parsing row {idx} in Monthly Details: {e}")
+                    continue
+        
+        except Exception as e:
+            print(f"  Warning: Error parsing Monthly Details sheet: {e}")
+        
+        return facts
+    
+    def _parse_strip_details(
+        self,
+        excel_file: pd.ExcelFile,
+        sheet_name: str,
+        auction_types: Optional[List[str]] = None,
+        source_url: Optional[str] = None
+    ) -> List[MarketPriceFact]:
+        """
+        Parse Strip Auction Details sheet.
+        
+        Expected structure:
+        - Columns: Capability Period | Zone | Price | Awarded MW | Delivery Months | ...
+        
+        Args:
+            excel_file: ExcelFile object
+            sheet_name: Name of sheet to parse
+            auction_types: Filter by auction types (None = all)
+        
+        Returns:
+            List of MarketPriceFact objects
+        """
+        facts = []
+        
+        if auction_types and 'STRIP' not in [a.upper() for a in auction_types]:
+            return facts
+        
+        try:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=0)
+            
+            # Find column indices
+            period_col = None
+            zone_col = None
+            price_col = None
+            awarded_col = None
+            delivery_months_col = None
+            
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if 'capability' in col_lower or 'period' in col_lower or 'season' in col_lower:
+                    period_col = col
+                elif any(keyword in col_lower for keyword in ['zone', 'locality', 'region']):
+                    zone_col = col
+                elif 'price' in col_lower or 'mcp' in col_lower:
+                    price_col = col
+                elif 'awarded' in col_lower or 'cleared' in col_lower or 'mw' in col_lower:
+                    awarded_col = col
+                elif 'delivery' in col_lower and 'month' in col_lower:
+                    delivery_months_col = col
+            
+            # Parse each row
+            for idx, row in df.iterrows():
+                try:
+                    # Extract capability period
+                    if period_col and pd.notna(row[period_col]):
+                        period_str = str(row[period_col]).upper()
+                        if 'WINTER' in period_str:
+                            capability_period = 'WINTER'
+                        elif 'SUMMER' in period_str:
+                            capability_period = 'SUMMER'
+                        else:
+                            continue  # Skip if can't determine period
+                    else:
+                        continue
+                    
+                    # Extract zone
+                    if zone_col and pd.notna(row[zone_col]):
+                        zone_name = str(row[zone_col]).strip()
+                    else:
+                        continue
+                    
+                    # Extract price
+                    if price_col and pd.notna(row[price_col]):
+                        price = float(str(row[price_col]).replace('$', '').replace(',', '').strip())
+                    else:
+                        continue
+                    
+                    # Extract awarded MW (optional)
+                    awarded_mw = None
+                    if awarded_col and pd.notna(row[awarded_col]):
+                        try:
+                            awarded_mw = float(str(row[awarded_col]).replace(',', '').strip())
+                        except:
+                            pass
+                    
+                    # Extract delivery months or determine from capability period
+                    if delivery_months_col and pd.notna(row[delivery_months_col]):
+                        delivery_months_str = str(row[delivery_months_col])
+                        # Try to parse (could be "Nov-Apr" or "202311-202404" or list)
+                        delivery_months = self._parse_delivery_months(delivery_months_str, capability_period)
+                    else:
+                        # Determine from capability period and year
+                        # Need to extract year from somewhere - try to find it
+                        year = datetime.now().year  # Default
+                        for col in df.columns:
+                            if 'year' in str(col).lower() and pd.notna(row[col]):
+                                try:
+                                    year = int(row[col])
+                                    break
+                                except:
+                                    pass
+                        
+                        # Determine auction month based on capability period
+                        if capability_period == "WINTER":
+                            auction_month = f"{year}10"  # October
+                        else:  # SUMMER
+                            auction_month = f"{year}04"  # April
+                        
+                        delivery_months = get_delivery_months_for_strip(auction_month, capability_period)
+                    
+                    # For strip auctions, create ONE record per zone (not per delivery month)
+                    # Use auction_month as delivery_month so all records go into one file
+                    # This matches the HTML scraping behavior
+                    if delivery_months:
+                        # Use first delivery month to determine auction_month
+                        first_delivery = delivery_months[0]
+                        year = int(first_delivery[:4])
+                        
+                        # Determine auction_month based on capability period
+                        if capability_period == "WINTER":
+                            auction_month = f"{year}10"  # October
+                        else:  # SUMMER
+                            auction_month = f"{year}04"  # April
+                        
+                        # Use auction_month as delivery_month (so all go into one partition)
+                        delivery_month = auction_month
+                        
+                        # Calculate time range for entire capability period
+                        first_delivery_dt = yyyymm_to_datetime(delivery_months[0], tz=pytz.UTC)
+                        last_delivery_dt = yyyymm_to_datetime(delivery_months[-1], tz=pytz.UTC)
+                        
+                        start_time = first_delivery_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                        if last_delivery_dt.month == 12:
+                            end_time = last_delivery_dt.replace(year=last_delivery_dt.year + 1, month=1, day=1) - timedelta(seconds=1)
+                        else:
+                            end_time = last_delivery_dt.replace(month=last_delivery_dt.month + 1, day=1) - timedelta(seconds=1)
+                        
+                        fact = normalize_capacity_price(
+                            iso_code=self.iso_code,
+                            node_id=zone_name,
+                            node_type="ZONE",
+                            start_time=start_time,
+                            end_time=end_time,
+                            price=price,
+                            product="SEASONAL",
+                            zone=zone_name,
+                            auction_id=f"{auction_month}_STRIP_{zone_name}",
+                            source_url=source_url,
+                            auction_time=None,
+                            capability_period=capability_period,
+                            auction_type="STRIP",
+                            awarded_mw=awarded_mw,
+                            posted_at=None,
+                            season_id=None,
+                        )
+                        fact.auction_month = auction_month
+                        fact.delivery_month = delivery_month
+                        
+                        if fact:
+                            facts.append(fact)
+                
+                except Exception as e:
+                    print(f"  Warning: Error parsing row {idx} in Strip Details: {e}")
+                    continue
+        
+        except Exception as e:
+            print(f"  Warning: Error parsing Strip Details sheet: {e}")
+        
+        return facts
+    
+    def _parse_spot_details(
+        self,
+        excel_file: pd.ExcelFile,
+        sheet_name: str,
+        auction_types: Optional[List[str]] = None,
+        source_url: Optional[str] = None
+    ) -> List[MarketPriceFact]:
+        """
+        Parse Spot Auction Details sheet (rare - spot auctions are infrequent).
+        
+        Expected structure:
+        - Columns: Auction Date | Zone | Price | Awarded MW | ...
+        
+        Args:
+            excel_file: ExcelFile object
+            sheet_name: Name of sheet to parse
+            auction_types: Filter by auction types (None = all)
+        
+        Returns:
+            List of MarketPriceFact objects
+        """
+        facts = []
+        
+        if auction_types and 'SPOT' not in [a.upper() for a in auction_types]:
+            return facts
+        
+        try:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name, header=0)
+            
+            # Find column indices
+            date_col = None
+            zone_col = None
+            price_col = None
+            awarded_col = None
+            
+            for col in df.columns:
+                col_lower = str(col).lower()
+                if 'date' in col_lower or 'auction' in col_lower:
+                    date_col = col
+                elif any(keyword in col_lower for keyword in ['zone', 'locality', 'region']):
+                    zone_col = col
+                elif 'price' in col_lower or 'mcp' in col_lower:
+                    price_col = col
+                elif 'awarded' in col_lower or 'cleared' in col_lower or 'mw' in col_lower:
+                    awarded_col = col
+            
+            # Parse each row
+            for idx, row in df.iterrows():
+                try:
+                    # Extract auction date
+                    if date_col and pd.notna(row[date_col]):
+                        auction_month = self._parse_date_to_yyyymm(row[date_col])
+                    else:
+                        continue
+                    
+                    # Extract zone
+                    if zone_col and pd.notna(row[zone_col]):
+                        zone_name = str(row[zone_col]).strip()
+                    else:
+                        continue
+                    
+                    # Extract price
+                    if price_col and pd.notna(row[price_col]):
+                        price = float(str(row[price_col]).replace('$', '').replace(',', '').strip())
+                    else:
+                        continue
+                    
+                    # Extract awarded MW (optional)
+                    awarded_mw = None
+                    if awarded_col and pd.notna(row[awarded_col]):
+                        try:
+                            awarded_mw = float(str(row[awarded_col]).replace(',', '').strip())
+                        except:
+                            pass
+                    
+                    # For spot auctions, delivery_month is typically same as auction_month
+                    delivery_month = auction_month
+                    
+                    # Create fact
+                    fact = self._create_spot_fact(
+                        zone_name, auction_month, delivery_month, price, awarded_mw, source_url
+                    )
+                    if fact:
+                        facts.append(fact)
+                
+                except Exception as e:
+                    print(f"  Warning: Error parsing row {idx} in Spot Details: {e}")
+                    continue
+        
+        except Exception as e:
+            print(f"  Warning: Error parsing Spot Details sheet: {e}")
+        
+        return facts
+    
+    def _parse_generic_sheet(
+        self,
+        df: pd.DataFrame,
+        sheet_name: str,
+        auction_types: Optional[List[str]] = None,
+        source_url: Optional[str] = None
+    ) -> List[MarketPriceFact]:
+        """
+        Attempt to parse a generic sheet by detecting structure.
+        
+        Args:
+            df: DataFrame from sheet
+            sheet_name: Name of sheet
+            auction_types: Filter by auction types
+        
+        Returns:
+            List of MarketPriceFact objects (empty if can't parse)
+        """
+        # This is a fallback - try to detect structure
+        # For now, return empty - can be enhanced later
+        return []
+    
+    def _parse_date_to_yyyymm(self, value) -> str:
+        """Convert various date formats to YYYYMM string."""
+        try:
+            if isinstance(value, datetime):
+                return datetime_to_yyyymm(value)
+            elif isinstance(value, pd.Timestamp):
+                return datetime_to_yyyymm(value.to_pydatetime())
+            else:
+                # Try parsing string
+                dt = pd.to_datetime(str(value))
+                return datetime_to_yyyymm(dt.to_pydatetime())
+        except:
+            # Fallback: try to extract YYYYMM from string
+            match = re.search(r'(\d{4})[-\s/]?(\d{2})', str(value))
+            if match:
+                return f"{match.group(1)}{match.group(2)}"
+            return datetime_to_yyyymm(datetime.now())  # Default fallback
+    
+    def _parse_delivery_months(self, value: str, capability_period: str) -> List[str]:
+        """Parse delivery months string to list of YYYYMM strings."""
+        # Could be "Nov-Apr", "202311-202404", "Nov, Dec, Jan", etc.
+        # For now, return empty and let caller determine from capability_period
+        # This can be enhanced with more parsing logic
+        return []
+    
+    def _create_fact_from_mcp(
+        self,
+        zone_name: str,
+        delivery_month: str,
+        price: float,
+        auction_type: str,
+        source_url: Optional[str] = None
+    ) -> Optional[MarketPriceFact]:
+        """Create MarketPriceFact from MCP Table data."""
+        try:
+            delivery_dt = yyyymm_to_datetime(delivery_month, tz=pytz.UTC)
+            start_time = delivery_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if delivery_dt.month == 12:
+                end_time = delivery_dt.replace(year=delivery_dt.year + 1, month=1, day=1) - timedelta(seconds=1)
+            else:
+                end_time = delivery_dt.replace(month=delivery_dt.month + 1, day=1) - timedelta(seconds=1)
+            
+            # For MCP table, auction_month is typically same as delivery_month
+            auction_month = delivery_month
+            
+            capability_period = get_capability_period(delivery_month)
+            
+            product = "MONTHLY" if auction_type == "MONTHLY" else "SEASONAL"
+            
+            return normalize_capacity_price(
+                iso_code=self.iso_code,
+                node_id=zone_name,
+                node_type="ZONE",
+                start_time=start_time,
+                end_time=end_time,
+                price=price,
+                product=product,
+                zone=zone_name,
+                auction_id=f"{auction_month}_{auction_type}_{zone_name}",
+                source_url=source_url,
+                auction_time=None,
+                capability_period=capability_period,
+                auction_type=auction_type,
+                awarded_mw=None,  # MCP table typically doesn't have awarded_mw
+                posted_at=None,
+                season_id=None,
+            )
+        except Exception as e:
+            print(f"  Warning: Error creating fact from MCP data: {e}")
+            return None
+    
+    def _create_monthly_fact(
+        self,
+        zone_name: str,
+        auction_month: str,
+        delivery_month: str,
+        price: float,
+        awarded_mw: Optional[float] = None,
+        source_url: Optional[str] = None
+    ) -> Optional[MarketPriceFact]:
+        """Create MarketPriceFact for monthly auction."""
+        try:
+            delivery_dt = yyyymm_to_datetime(delivery_month, tz=pytz.UTC)
+            start_time = delivery_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if delivery_dt.month == 12:
+                end_time = delivery_dt.replace(year=delivery_dt.year + 1, month=1, day=1) - timedelta(seconds=1)
+            else:
+                end_time = delivery_dt.replace(month=delivery_dt.month + 1, day=1) - timedelta(seconds=1)
+            
+            capability_period = get_capability_period(delivery_month)
+            
+            return normalize_capacity_price(
+                iso_code=self.iso_code,
+                node_id=zone_name,
+                node_type="ZONE",
+                start_time=start_time,
+                end_time=end_time,
+                price=price,
+                product="MONTHLY",
+                zone=zone_name,
+                auction_id=f"{auction_month}_MONTHLY_{zone_name}",
+                source_url=source_url,
+                auction_time=None,
+                capability_period=capability_period,
+                auction_type="MONTHLY",
+                awarded_mw=awarded_mw,
+                posted_at=None,
+                season_id=None,
+            )
+        except Exception as e:
+            print(f"  Warning: Error creating monthly fact: {e}")
+            return None
+    
+    def _create_strip_fact(
+        self,
+        zone_name: str,
+        delivery_month: str,
+        capability_period: str,
+        price: float,
+        awarded_mw: Optional[float] = None
+    ) -> Optional[MarketPriceFact]:
+        """Create MarketPriceFact for strip auction."""
+        try:
+            delivery_dt = yyyymm_to_datetime(delivery_month, tz=pytz.UTC)
+            start_time = delivery_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if delivery_dt.month == 12:
+                end_time = delivery_dt.replace(year=delivery_dt.year + 1, month=1, day=1) - timedelta(seconds=1)
+            else:
+                end_time = delivery_dt.replace(month=delivery_dt.month + 1, day=1) - timedelta(seconds=1)
+            
+            # For strip auctions, auction_month is typically October (Winter) or April (Summer)
+            year = int(delivery_month[:4])
+            if capability_period == "WINTER":
+                auction_month = f"{year}10"  # October
+            else:  # SUMMER
+                auction_month = f"{year}04"  # April
+            
+            return normalize_capacity_price(
+                iso_code=self.iso_code,
+                node_id=zone_name,
+                node_type="ZONE",
+                start_time=start_time,
+                end_time=end_time,
+                price=price,
+                product="SEASONAL",
+                zone=zone_name,
+                auction_id=f"{auction_month}_STRIP_{zone_name}",
+                source_url=None,
+                auction_time=None,
+                capability_period=capability_period,
+                auction_type="STRIP",
+                awarded_mw=awarded_mw,
+                posted_at=None,
+                season_id=None,
+            )
+        except Exception as e:
+            print(f"  Warning: Error creating strip fact: {e}")
+            return None
+    
+    def _create_spot_fact(
+        self,
+        zone_name: str,
+        auction_month: str,
+        delivery_month: str,
+        price: float,
+        awarded_mw: Optional[float] = None,
+        source_url: Optional[str] = None
+    ) -> Optional[MarketPriceFact]:
+        """Create MarketPriceFact for spot auction."""
+        try:
+            delivery_dt = yyyymm_to_datetime(delivery_month, tz=pytz.UTC)
+            start_time = delivery_dt.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            if delivery_dt.month == 12:
+                end_time = delivery_dt.replace(year=delivery_dt.year + 1, month=1, day=1) - timedelta(seconds=1)
+            else:
+                end_time = delivery_dt.replace(month=delivery_dt.month + 1, day=1) - timedelta(seconds=1)
+            
+            capability_period = get_capability_period(delivery_month)
+            
+            return normalize_capacity_price(
+                iso_code=self.iso_code,
+                node_id=zone_name,
+                node_type="ZONE",
+                start_time=start_time,
+                end_time=end_time,
+                price=price,
+                product="MONTHLY",  # Spot uses MONTHLY product with SPOT auction_type
+                zone=zone_name,
+                auction_id=f"{auction_month}_SPOT_{zone_name}",
+                source_url=source_url,
+                auction_time=None,
+                capability_period=capability_period,
+                auction_type="SPOT",
+                awarded_mw=awarded_mw,
+                posted_at=None,
+                season_id=None,
+            )
+        except Exception as e:
+            print(f"  Warning: Error creating spot fact: {e}")
+            return None
+    
+    def fetch_capacity_prices_from_excel(
+        self,
+        excel_file_path: Path,
+        auction_types: Optional[List[str]] = None,
+    ) -> List[MarketPriceFact]:
+        """
+        Fetch capacity prices from Excel Market Report file.
+        
+        Args:
+            excel_file_path: Path to Excel file
+            auction_types: Which auction types to parse (None = all: MONTHLY, STRIP, SPOT)
+        
+        Returns:
+            List of MarketPriceFact objects
+        """
+        return self._parse_excel_report(excel_file_path, auction_types)
     
     def fetch_energy_prices(
         self,

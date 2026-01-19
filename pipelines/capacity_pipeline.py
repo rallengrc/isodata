@@ -4,7 +4,7 @@ Capacity price data pipeline.
 
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, List
 from adapters.base import ISOAdapter
 from storage.parquet_writer import ParquetWriter
 from storage.duckdb_views import DuckDBViews
@@ -225,3 +225,120 @@ def backfill_capacity_data(
         "errors": errors,
         "error_count": len(errors),
     }
+
+
+def import_capacity_from_excel(
+    adapter: ISOAdapter,
+    excel_file_path: Path,
+    auction_types: Optional[List[str]] = None,
+) -> dict:
+    """
+    Import capacity prices from Excel Market Report file.
+    
+    Args:
+        adapter: ISO adapter instance (must be NYISOCapacityAdapter)
+        excel_file_path: Path to Excel file
+        auction_types: Which auction types to parse (None = all: MONTHLY, STRIP, SPOT)
+    
+    Returns:
+        Dictionary with import results
+    """
+    iso_code = adapter.get_iso_code()
+    dataset_name = f"capacity_excel_{iso_code.lower()}"
+    
+    # Track start time
+    start_time = datetime.utcnow()
+    
+    try:
+        # Check if adapter has Excel import method
+        if not hasattr(adapter, 'fetch_capacity_prices_from_excel'):
+            raise ValueError(f"Adapter {type(adapter).__name__} does not support Excel import")
+        
+        # Fetch data from Excel
+        print(f"Importing {iso_code} capacity prices from Excel file: {excel_file_path}")
+        facts = adapter.fetch_capacity_prices_from_excel(
+            excel_file_path=excel_file_path,
+            auction_types=auction_types,
+        )
+        
+        if not facts:
+            print(f"No data found in Excel file")
+            log_ingestion(
+                dataset=dataset_name,
+                iso=iso_code,
+                status="NO_DATA",
+                rows=0,
+            )
+            return {"status": "no_data", "rows": 0}
+        
+        print(f"Parsed {len(facts)} capacity price records from Excel")
+        
+        # Write to Parquet (with validation)
+        parquet_writer = ParquetWriter(DIRS["parquet"], validate=True)
+        write_result = parquet_writer.write_facts(
+            facts=facts,
+            iso_code=iso_code,
+            market_type="CAPACITY",
+        )
+        
+        written_files = write_result['files']
+        rows_written = write_result['rows_written']
+        errors = write_result['errors']
+        warnings = write_result['warnings']
+        
+        print(f"Wrote {len(written_files)} Parquet files ({rows_written} rows)")
+        
+        if errors:
+            print(f"⚠ Validation errors: {len(errors)}")
+            for error in errors[:5]:  # Show first 5 errors
+                print(f"  - {error}")
+            if len(errors) > 5:
+                print(f"  ... and {len(errors) - 5} more errors")
+        
+        if warnings:
+            print(f"ℹ Validation warnings: {len(warnings)}")
+            for warning in warnings[:5]:  # Show first 5 warnings
+                print(f"  - {warning}")
+            if len(warnings) > 5:
+                print(f"  ... and {len(warnings) - 5} more warnings")
+        
+        # Refresh DuckDB views
+        duckdb_views = DuckDBViews(DUCKDB_DB, DIRS["parquet"])
+        duckdb_views.refresh_views()
+        duckdb_views.close()
+        
+        print("Refreshed DuckDB views")
+        
+        # Log successful ingestion
+        end_time = datetime.utcnow()
+        log_ingestion(
+            dataset=dataset_name,
+            iso=iso_code,
+            status="SUCCESS",
+            rows=len(facts),
+            start_time=start_time,
+            end_time=end_time,
+        )
+        
+        return {
+            "status": "success",
+            "rows": rows_written,
+            "files": len(written_files),
+            "duration_seconds": (end_time - start_time).total_seconds(),
+            "validation_errors": len(errors),
+            "validation_warnings": len(warnings),
+        }
+    
+    except Exception as e:
+        # Log error
+        error_msg = str(e)
+        print(f"Error importing from Excel: {error_msg}")
+        log_ingestion(
+            dataset=dataset_name,
+            iso=iso_code,
+            status="ERROR",
+            error=error_msg,
+            start_time=start_time,
+            end_time=datetime.utcnow(),
+        )
+        raise
