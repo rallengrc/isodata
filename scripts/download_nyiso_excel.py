@@ -602,7 +602,8 @@ class NYISOExcelDownloader:
     
     def extract_date_from_filename(self, filename: str) -> Optional[datetime]:
         """
-        Extract date from filename like "ICAP-Market-Report-July-2024.xlsx"
+        Extract date from filename like "ICAP Market Report - December 2023.xlsx"
+        or "ICAP-Market-Report-July-2024.xlsx"
         
         Args:
             filename: Excel filename
@@ -610,30 +611,51 @@ class NYISOExcelDownloader:
         Returns:
             datetime object or None if can't parse
         """
-        # Month name mapping
+        # Month name mapping (full names only for regex matching)
         months = {
-            'january': 1, 'jan': 1,
-            'february': 2, 'feb': 2,
-            'march': 3, 'mar': 3,
-            'april': 4, 'apr': 4,
+            'january': 1,
+            'february': 2,
+            'march': 3,
+            'april': 4,
             'may': 5,
-            'june': 6, 'jun': 6,
-            'july': 7, 'jul': 7,
-            'august': 8, 'aug': 8,
-            'september': 9, 'sep': 9,
-            'october': 10, 'oct': 10,
-            'november': 11, 'nov': 11,
-            'december': 12, 'dec': 12,
+            'june': 6,
+            'july': 7,
+            'august': 8,
+            'september': 9,
+            'october': 10,
+            'november': 11,
+            'december': 12,
         }
         
-        # Try to extract month and year
+        filename_lower = filename.lower()
+        
+        # Try to find month name and year using regex
+        # Pattern: month name (full) followed by year (4 digits)
+        # Handles: "December 2023", "December-2023", "December_2023", etc.
+        month_year_pattern = re.compile(
+            r'(january|february|march|april|may|june|july|august|september|october|november|december)[\s\-_]+(\d{4})',
+            re.IGNORECASE
+        )
+        
+        match = month_year_pattern.search(filename)
+        if match:
+            month_name = match.group(1).lower()
+            year = int(match.group(2))
+            
+            if month_name in months:
+                month_num = months[month_name]
+                try:
+                    return datetime(year, month_num, 1)
+                except ValueError:
+                    pass
+        
+        # Fallback: try the original pattern (for formats like "ICAP-Market-Report-July-2024")
         match = self.EXCEL_PATTERN.search(filename)
         if match:
             # Extract year from pattern
             year = int(match.group(1))
             
-            # Find month name
-            filename_lower = filename.lower()
+            # Find month name in filename
             for month_name, month_num in months.items():
                 if month_name in filename_lower:
                     try:
@@ -641,7 +663,7 @@ class NYISOExcelDownloader:
                     except ValueError:
                         continue
         
-        # Fallback: try to extract year from filename
+        # Last fallback: try to extract year from filename (default to January)
         year_match = re.search(r'(\d{4})', filename)
         if year_match:
             year = int(year_match.group(1))
@@ -675,20 +697,22 @@ class NYISOExcelDownloader:
         if file_path.exists() and not force:
             return False, "File already exists"
         
-        # Check date filters (year-only comparison)
+        # Check date filters (year + month comparison)
         if start_date or end_date:
             file_date = self.extract_date_from_filename(filename)
             if file_date:
-                # Extract years for comparison (ignore month/day)
-                file_year = file_date.year
-                if start_date:
-                    start_year = start_date.year
-                    if file_year < start_year:
-                        return False, f"File year {file_year} before start year {start_year}"
-                if end_date:
-                    end_year = end_date.year
-                    if file_year > end_year:
-                        return False, f"File year {file_year} after end year {end_year}"
+                # Compare full dates (year + month, day set to 1 for comparison)
+                # Normalize dates to first of month for comparison
+                file_date_normalized = datetime(file_date.year, file_date.month, 1)
+                start_date_normalized = datetime(start_date.year, start_date.month, 1) if start_date else None
+                end_date_normalized = datetime(end_date.year, end_date.month, 1) if end_date else None
+                
+                if start_date_normalized:
+                    if file_date_normalized < start_date_normalized:
+                        return False, f"File date {file_date.strftime('%B %Y')} before start date {start_date.strftime('%B %Y')}"
+                if end_date_normalized:
+                    if file_date_normalized > end_date_normalized:
+                        return False, f"File date {file_date.strftime('%B %Y')} after end date {end_date.strftime('%B %Y')}"
             else:
                 # If we can't parse date but filters are set, skip it
                 if start_date or end_date:
@@ -750,7 +774,9 @@ class NYISOExcelDownloader:
         save_html: bool = False,
         search_query: str = 'ICAP market report',
         no_search: bool = False,
-        manual_urls: Optional[List[str]] = None
+        manual_urls: Optional[List[str]] = None,
+        delta: int = 200,
+        start: int = 1
     ) -> dict:
         """
         Download all ICAP Market Report Excel files.
@@ -998,20 +1024,6 @@ Examples:
         '--manual-urls',
         nargs='*',
         help='Manually provide document URLs to download (e.g., from search results page)'
-    )
-    
-    parser.add_argument(
-        '--delta',
-        type=int,
-        default=200,
-        help='Number of search results per page (default: 200)'
-    )
-    
-    parser.add_argument(
-        '--start',
-        type=int,
-        default=1,
-        help='Starting result number for pagination (default: 1)'
     )
     
     parser.add_argument(

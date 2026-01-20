@@ -1128,8 +1128,10 @@ class NYISOCapacityAdapter(ISOAdapter):
         Parse MCP Table sheet - Market Clearing Prices by zone and auction type.
         
         Expected structure:
-        - Columns: Zone/Locality | Monthly | Strip | Spot | Date/Period
-        - Or multi-level headers
+        - First column: Date (one date per row)
+        - Other columns: Zone_AuctionType (e.g., NYCA_Strip, NYCA_Monthly, GHIJ_Spot)
+        - Each row represents a different month/date
+        - Each column represents a zone + auction type combination
         
         Args:
             excel_file: ExcelFile object
@@ -1149,106 +1151,100 @@ class NYISOCapacityAdapter(ISOAdapter):
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = ['_'.join(col).strip() for col in df.columns.values]
             
-            # Find zone column (usually first column or contains "Zone", "Locality", etc.)
-            zone_col = None
-            for col in df.columns:
-                if any(keyword in str(col).lower() for keyword in ['zone', 'locality', 'region', 'area']):
-                    zone_col = col
-                    break
-            
-            if zone_col is None:
-                # Assume first column is zone
-                zone_col = df.columns[0]
-            
-            # Find price columns
-            monthly_col = None
-            strip_col = None
-            spot_col = None
-            
-            for col in df.columns:
-                col_lower = str(col).lower()
-                if 'monthly' in col_lower and ('price' in col_lower or 'mcp' in col_lower or '$' in col_lower):
-                    monthly_col = col
-                elif 'strip' in col_lower and ('price' in col_lower or 'mcp' in col_lower or '$' in col_lower):
-                    strip_col = col
-                elif 'spot' in col_lower and ('price' in col_lower or 'mcp' in col_lower or '$' in col_lower):
-                    spot_col = col
-            
-            # Find date/period column
+            # Find date column (usually first column, contains "Date")
             date_col = None
             for col in df.columns:
                 if any(keyword in str(col).lower() for keyword in ['date', 'period', 'month', 'year']):
                     date_col = col
                     break
             
-            # Parse each row
+            if date_col is None:
+                # Assume first column is date
+                date_col = df.columns[0]
+            
+            # Parse each row (each row is a different date)
             for idx, row in df.iterrows():
-                zone_name = str(row[zone_col]).strip() if pd.notna(row[zone_col]) else None
-                if not zone_name or zone_name.lower() in ['nan', 'none', '']:
+                # Skip header row or rows without valid dates
+                if pd.isna(row[date_col]) or str(row[date_col]).lower() in ['date', 'nan', 'none', '']:
                     continue
                 
-                # Determine date/period
-                if date_col and pd.notna(row[date_col]):
-                    period_str = str(row[date_col])
-                    # Try to extract YYYYMM from date
+                # Extract date from first column
+                try:
+                    if isinstance(row[date_col], datetime):
+                        delivery_month = datetime_to_yyyymm(row[date_col])
+                        delivery_date = row[date_col]
+                    elif isinstance(row[date_col], pd.Timestamp):
+                        delivery_date = row[date_col].to_pydatetime()
+                        delivery_month = datetime_to_yyyymm(delivery_date)
+                    else:
+                        # Try parsing string (handles "Apr-23" format if present)
+                        period_str = str(row[date_col])
+                        dt = pd.to_datetime(period_str)
+                        delivery_date = dt.to_pydatetime()
+                        delivery_month = datetime_to_yyyymm(delivery_date)
+                except Exception as e:
+                    # Skip rows with unparseable dates
+                    continue
+                
+                # Parse all other columns (zone + auction type combinations)
+                for col_name in df.columns:
+                    if col_name == date_col:
+                        continue
+                    
+                    # Skip columns that don't look like zone_auctiontype
+                    if '_' not in str(col_name):
+                        continue
+                    
+                    # Extract zone and auction type from column name
+                    # Format: "NYCA_Strip", "GHIJ_Monthly", "NYC_Spot", etc.
+                    parts = str(col_name).split('_')
+                    if len(parts) < 2:
+                        continue
+                    
+                    zone_name = parts[0].strip()
+                    auction_type_str = '_'.join(parts[1:]).strip().lower()
+                    
+                    # Map auction type string to standard format
+                    auction_type = None
+                    if 'monthly' in auction_type_str:
+                        auction_type = 'MONTHLY'
+                    elif 'strip' in auction_type_str:
+                        auction_type = 'STRIP'
+                    elif 'spot' in auction_type_str:
+                        auction_type = 'SPOT'
+                    else:
+                        # Skip if we can't identify auction type
+                        continue
+                    
+                    # Check if this auction type should be included
+                    if auction_types is not None and auction_type not in [a.upper() for a in auction_types]:
+                        continue
+                    
+                    # Extract price value
+                    price_value = row[col_name]
+                    if pd.isna(price_value):
+                        continue
+                    
                     try:
-                        if isinstance(row[date_col], datetime):
-                            delivery_month = datetime_to_yyyymm(row[date_col])
-                        else:
-                            # Try parsing string
-                            dt = pd.to_datetime(period_str)
-                            delivery_month = datetime_to_yyyymm(dt)
-                    except:
-                        # Default to current year/month if can't parse
-                        delivery_month = datetime_to_yyyymm(datetime.now())
-                else:
-                    # No date column - use current month as fallback
-                    delivery_month = datetime_to_yyyymm(datetime.now())
-                
-                # Parse Monthly price
-                if monthly_col and pd.notna(row[monthly_col]):
-                    if auction_types is None or 'MONTHLY' in [a.upper() for a in auction_types]:
-                        try:
-                            price = float(str(row[monthly_col]).replace('$', '').replace(',', '').strip())
-                            if price > 0:
-                                fact = self._create_fact_from_mcp(
-                                    zone_name, delivery_month, price, 'MONTHLY', source_url
-                                )
-                                if fact:
-                                    facts.append(fact)
-                        except (ValueError, AttributeError):
-                            pass
-                
-                # Parse Strip price
-                if strip_col and pd.notna(row[strip_col]):
-                    if auction_types is None or 'STRIP' in [a.upper() for a in auction_types]:
-                        try:
-                            price = float(str(row[strip_col]).replace('$', '').replace(',', '').strip())
-                            if price > 0:
-                                fact = self._create_fact_from_mcp(
-                                    zone_name, delivery_month, price, 'STRIP', source_url
-                                )
-                                if fact:
-                                    facts.append(fact)
-                        except (ValueError, AttributeError):
-                            pass
-                
-                # Parse Spot price (rare)
-                if spot_col and pd.notna(row[spot_col]):
-                    if auction_types is None or 'SPOT' in [a.upper() for a in auction_types]:
-                        try:
-                            price = float(str(row[spot_col]).replace('$', '').replace(',', '').strip())
-                            if price > 0:
-                                fact = self._create_fact_from_mcp(
-                                    zone_name, delivery_month, price, 'SPOT', source_url
-                                )
-                                if fact:
-                                    facts.append(fact)
-                        except (ValueError, AttributeError):
-                            pass
+                        # Convert to float, handling currency symbols and commas
+                        price_str = str(price_value).replace('$', '').replace(',', '').strip()
+                        price = float(price_str)
+                        
+                        # Only create fact if price is valid (can be negative in electricity markets)
+                        if price != 0:  # Allow negative prices
+                            fact = self._create_fact_from_mcp(
+                                zone_name, delivery_month, price, auction_type, source_url
+                            )
+                            if fact:
+                                facts.append(fact)
+                    except (ValueError, AttributeError, TypeError):
+                        # Skip invalid price values
+                        continue
         
         except Exception as e:
             print(f"  Warning: Error parsing MCP Table sheet: {e}")
+            import traceback
+            traceback.print_exc()
         
         return facts
     

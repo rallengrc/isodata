@@ -171,6 +171,7 @@ def main():
     # Capacity-specific arguments
     parser.add_argument("--auction-type", type=str, choices=["MONTHLY", "STRIP"], help="Auction type (MONTHLY or STRIP) - for capacity pipeline")
     parser.add_argument("--excel-file", type=str, help="Path to Excel file for capacity data import (alternative to HTML scraping)")
+    parser.add_argument("--excel-dir", type=str, help="Path to directory containing Excel files to import (processes all *.xlsx files)")
     parser.add_argument("--excel-auction-types", type=str, nargs="+", choices=["MONTHLY", "STRIP", "SPOT"], help="Auction types to parse from Excel (default: all)")
     
     # Backfill arguments
@@ -271,25 +272,95 @@ def main():
             return
         
         # Excel import mode (alternative to HTML scraping)
-        if args.excel_file:
-            excel_path = Path(args.excel_file)
-            if not excel_path.exists():
-                print(f"Error: Excel file not found: {excel_path}")
-                return
-            
+        if args.excel_file or args.excel_dir:
             auction_types = args.excel_auction_types if args.excel_auction_types else None
             
-            result = import_capacity_from_excel(
-                adapter=adapter,
-                excel_file_path=excel_path,
-                auction_types=auction_types,
-            )
-            print(f"\nExcel import completed:")
-            print(f"  Status: {result['status']}")
-            print(f"  Rows: {result.get('rows', 0)}")
-            print(f"  Files: {result.get('files', 0)}")
-            if result.get('validation_errors', 0) > 0:
-                print(f"  Validation errors: {result['validation_errors']}")
+            if args.excel_dir:
+                # Process all Excel files in directory
+                excel_dir = Path(args.excel_dir)
+                if not excel_dir.exists() or not excel_dir.is_dir():
+                    print(f"Error: Directory not found: {excel_dir}")
+                    return
+                
+                # Find all .xlsx files
+                excel_files = sorted(excel_dir.glob("*.xlsx"))
+                if not excel_files:
+                    print(f"Error: No .xlsx files found in {excel_dir}")
+                    return
+                
+                print(f"\nFound {len(excel_files)} Excel file(s) to process:")
+                for f in excel_files:
+                    print(f"  - {f.name}")
+                print()
+                
+                # Process each file
+                total_results = {
+                    'status': 'success',
+                    'rows': 0,
+                    'files': 0,
+                    'validation_errors': 0,
+                    'processed_files': [],
+                    'failed_files': []
+                }
+                
+                for excel_file in excel_files:
+                    print(f"\n{'='*80}")
+                    print(f"Processing: {excel_file.name}")
+                    print(f"{'='*80}")
+                    
+                    try:
+                        result = import_capacity_from_excel(
+                            adapter=adapter,
+                            excel_file_path=excel_file,
+                            auction_types=auction_types,
+                        )
+                        
+                        total_results['rows'] += result.get('rows', 0)
+                        total_results['files'] += result.get('files', 0)
+                        total_results['validation_errors'] += result.get('validation_errors', 0)
+                        total_results['processed_files'].append(excel_file.name)
+                        
+                        print(f"  ✓ Completed: {result.get('rows', 0)} rows, {result.get('files', 0)} files")
+                        
+                    except Exception as e:
+                        print(f"  ✗ Error processing {excel_file.name}: {e}")
+                        total_results['failed_files'].append(excel_file.name)
+                        total_results['status'] = 'partial'
+                        import traceback
+                        traceback.print_exc()
+                
+                print(f"\n{'='*80}")
+                print(f"Batch Import Summary:")
+                print(f"{'='*80}")
+                print(f"  Processed: {len(total_results['processed_files'])} file(s)")
+                print(f"  Failed: {len(total_results['failed_files'])} file(s)")
+                print(f"  Total rows: {total_results['rows']}")
+                print(f"  Total files written: {total_results['files']}")
+                if total_results['validation_errors'] > 0:
+                    print(f"  Validation errors: {total_results['validation_errors']}")
+                if total_results['failed_files']:
+                    print(f"\n  Failed files:")
+                    for f in total_results['failed_files']:
+                        print(f"    - {f}")
+            
+            elif args.excel_file:
+                # Process single file
+                excel_path = Path(args.excel_file)
+                if not excel_path.exists():
+                    print(f"Error: Excel file not found: {excel_path}")
+                    return
+                
+                result = import_capacity_from_excel(
+                    adapter=adapter,
+                    excel_file_path=excel_path,
+                    auction_types=auction_types,
+                )
+                print(f"\nExcel import completed:")
+                print(f"  Status: {result['status']}")
+                print(f"  Rows: {result.get('rows', 0)}")
+                print(f"  Files: {result.get('files', 0)}")
+                if result.get('validation_errors', 0) > 0:
+                    print(f"  Validation errors: {result['validation_errors']}")
             if result.get('validation_warnings', 0) > 0:
                 print(f"  Validation warnings: {result['validation_warnings']}")
             return
