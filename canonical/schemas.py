@@ -65,9 +65,16 @@ class MarketPriceFact(BaseModel):
     capability_period: Optional[str] = Field(None, description="SUMMER or WINTER for capacity markets")
     auction_type: Optional[str] = Field(None, description="MONTHLY, STRIP, or SPOT for capacity markets")
     
-    # Price and unit
-    price: float = Field(..., description="Price value")
-    unit: str = Field(..., description="Price unit ($/MWh, $/kW-month, etc.)")
+    # Price fields - separate by market type to prevent Power/Energy mixing
+    price_energy: Optional[float] = Field(
+        None,
+        description="Energy price in $/MWh (only for ENERGY market_type)"
+    )
+    price_capacity: Optional[float] = Field(
+        None,
+        description="Capacity price in $/kW-month (only for CAPACITY market_type)"
+    )
+    unit: str = Field(..., description="Price unit metadata ($/MWh, $/kW-month, etc.)")
     
     # Capacity market specific - cleared quantities
     awarded_mw: Optional[float] = Field(None, description="Awarded/cleared quantity in MW (for capacity markets)")

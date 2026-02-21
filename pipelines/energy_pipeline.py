@@ -9,7 +9,8 @@ import sqlite3
 from adapters.base import ISOAdapter
 from storage.parquet_writer import ParquetWriter
 from storage.duckdb_views import DuckDBViews
-from run_pipeline import SQLITE_DB, DUCKDB_DB, DIRS, log_ingestion
+from run_pipeline import SQLITE_DB, DUCKDB_DB, DIRS, log_ingestion, log_data_source
+from config.url_constants import NYISO_ENERGY_BASE_URL
 
 
 def run_energy_pipeline(
@@ -103,6 +104,13 @@ def run_energy_pipeline(
             iso=iso_code,
             status="SUCCESS",
             rows=len(facts),
+        )
+        
+        # Log data source (NYISO MIS URL)
+        log_data_source(
+            dataset_name=dataset_name,
+            source_url=NYISO_ENERGY_BASE_URL,
+            iso_code=iso_code,
         )
         
         return {

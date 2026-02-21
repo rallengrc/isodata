@@ -28,6 +28,8 @@ class EIAAdapter(ISOAdapter):
     For price data, use direct ISO sources (NYISO, PJM, ISO-NE, etc.).
     """
     
+    # BASE_URL retained as a default; when available, url_registry should
+    # provide the actual base URL via key 'eia_v2_base'.
     BASE_URL = "https://api.eia.gov/v2/electricity/"
     
     def __init__(self, api_key: Optional[str] = None):

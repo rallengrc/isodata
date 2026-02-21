@@ -9,6 +9,7 @@ import pytz
 from adapters.base import ISOAdapter
 from canonical.schemas import MarketPriceFact
 from canonical.normalize import normalize_energy_price
+from config.url_constants import NYISO_ENERGY_BASE_URL
 
 try:
     from nyisotoolkit import NYISOData
@@ -131,7 +132,7 @@ class NYISOEnergyAdapter(ISOAdapter):
                                 price=float(price),
                                 product=product,
                                 zone=str(zone_name),
-                                source_url="https://mis.nyiso.com/public/",
+                                source_url=NYISO_ENERGY_BASE_URL,
                             )
                             facts.append(fact)
                 

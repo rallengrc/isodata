@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS ingestion_log (
     row_count INTEGER,
     error_message TEXT
 );
+
+CREATE TABLE IF NOT EXISTS url_registry (
+    url_key TEXT PRIMARY KEY,
+    url TEXT NOT NULL,
+    description TEXT,
+    iso_code TEXT,
+    active INTEGER DEFAULT 1,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
 """
 
 # -----------------------------
@@ -145,6 +155,116 @@ def log_ingestion(dataset, iso, status, rows=None, error=None, start_time=None, 
     )
     conn.commit()
     conn.close()
+
+
+def log_data_source(dataset_name, source_url, iso_code):
+    """
+    Log data source URL to SQLite.
+    
+    Args:
+        dataset_name: Dataset name (e.g., "capacity_excel_nyiso", "energy_da_nyiso")
+        source_url: Source URL or file path
+        iso_code: ISO code
+    """
+    conn = sqlite3.connect(SQLITE_DB)
+    
+    # Check if this source already exists
+    existing = conn.execute(
+        """
+        SELECT COUNT(*) FROM data_source
+        WHERE dataset_name = ? AND source_url = ? AND iso_code = ?
+        """,
+        (dataset_name, source_url, iso_code),
+    ).fetchone()[0]
+    
+    if existing == 0:
+        conn.execute(
+            """
+            INSERT INTO data_source (dataset_name, source_url, iso_code)
+            VALUES (?, ?, ?)
+            """,
+            (dataset_name, source_url, iso_code),
+        )
+        conn.commit()
+    
+    conn.close()
+
+
+class URLRegistryCache:
+    """
+    Simple in-memory cache for URL registry.
+    
+    Loaded from SQLite url_registry table and used as the single source
+    of truth for base URLs and other upstream endpoints.
+    """
+
+    def __init__(self):
+        """Load URL registry, falling back to built-in defaults if needed."""
+        from config.url_constants import URL_DEFAULTS
+
+        self._by_key = {}
+        self._db_available = False
+
+        # Start with built-in defaults
+        for url_key, rec in URL_DEFAULTS.items():
+            self._by_key[url_key] = {
+                "url": rec["url"],
+                "description": rec.get("description"),
+                "iso_code": rec.get("iso_code"),
+                "active": True,
+            }
+
+        # Try to overlay entries from SQLite if available
+        db_path = SQLITE_DB
+        try:
+            if not db_path.exists():
+                print("WARNING: metadata DB not initialized; using built-in URL defaults.")
+                return
+
+            conn = sqlite3.connect(db_path)
+            try:
+                cursor = conn.execute(
+                    """
+                    SELECT url_key, url, description, iso_code, active
+                    FROM url_registry
+                    """
+                )
+                for row in cursor:
+                    url_key, url, description, iso_code, active = row
+                    self._by_key[url_key] = {
+                        "url": url,
+                        "description": description,
+                        "iso_code": iso_code,
+                        "active": bool(active),
+                    }
+                self._db_available = True
+            finally:
+                conn.close()
+        except sqlite3.OperationalError:
+            # url_registry table might not exist yet; keep defaults
+            print("WARNING: url_registry table not found; using built-in URL defaults.")
+
+    def get(self, url_key: str) -> dict:
+        if url_key not in self._by_key:
+            raise KeyError(f"url_registry: key '{url_key}' not found")
+        record = self._by_key[url_key]
+        if not record.get("active", True):
+            raise KeyError(f"url_registry: key '{url_key}' is marked inactive")
+        return record
+
+    def get_url(self, url_key: str) -> str:
+        return self.get(url_key)["url"]
+
+
+_url_registry_cache = None
+
+
+def get_url_registry_cache() -> URLRegistryCache:
+    """Return singleton URLRegistryCache instance."""
+    global _url_registry_cache
+    if _url_registry_cache is None:
+        _url_registry_cache = URLRegistryCache()
+    return _url_registry_cache
 
 
 # -----------------------------

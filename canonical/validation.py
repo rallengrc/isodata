@@ -46,35 +46,43 @@ class DataValidator:
         if not validate_yyyymm(fact.delivery_month):
             errors.append(f"Invalid delivery_month format: {fact.delivery_month} (must be YYYYMM)")
         
-        # Validate price
-        if fact.price is None:
-            errors.append("Price cannot be None")
-        elif isinstance(fact.price, float):
-            # Negative prices are VALID in electricity markets:
-            # - Energy: Excess generation, generators paying to stay online, grid balancing
-            # - Capacity: Rare but possible in edge cases
-            # So we only warn, don't error
-            if fact.price < 0:
-                if fact.market_type == "ENERGY":
-                    warnings.append(f"Negative energy price: {fact.price} $/MWh (valid but unusual)")
-                else:
-                    warnings.append(f"Negative capacity price: {fact.price} $/kW-month (valid but unusual)")
-            
-            # Reasonable upper bounds (can be adjusted)
-            if fact.market_type == "ENERGY" and fact.price > 10000:
-                warnings.append(f"Unusually high energy price: {fact.price} $/MWh")
-            elif fact.market_type == "CAPACITY" and fact.price > 100:
-                warnings.append(f"Unusually high capacity price: {fact.price} $/kW-month")
+        # Validate price fields match market_type
+        if fact.market_type == "ENERGY":
+            if fact.price_energy is None:
+                errors.append("ENERGY market_type requires price_energy field")
+            if fact.price_capacity is not None:
+                errors.append("ENERGY market_type cannot have price_capacity field")
+            # Validate price value
+            if fact.price_energy is not None:
+                if fact.price_energy < 0:
+                    warnings.append(f"Negative energy price: {fact.price_energy} $/MWh (valid but unusual)")
+                if fact.price_energy > 10000:
+                    warnings.append(f"Unusually high energy price: {fact.price_energy} $/MWh")
+        elif fact.market_type == "CAPACITY":
+            if fact.price_capacity is None:
+                errors.append("CAPACITY market_type requires price_capacity field")
+            if fact.price_energy is not None:
+                errors.append("CAPACITY market_type cannot have price_energy field")
+            # Validate price value
+            if fact.price_capacity is not None:
+                if fact.price_capacity < 0:
+                    warnings.append(f"Negative capacity price: {fact.price_capacity} $/kW-month (valid but unusual)")
+                if fact.price_capacity > 100:
+                    warnings.append(f"Unusually high capacity price: {fact.price_capacity} $/kW-month")
+        else:
+            errors.append(f"Unknown market_type: {fact.market_type}")
         
         # Validate timestamps
         if fact.end_time <= fact.start_time:
             errors.append(f"end_time must be after start_time: {fact.start_time} -> {fact.end_time}")
         
-        # Validate units match market type
-        if fact.market_type == "ENERGY" and "$/MWh" not in fact.unit:
-            warnings.append(f"Energy market but unit is {fact.unit}, expected $/MWh")
-        elif fact.market_type == "CAPACITY" and "$/kW-month" not in fact.unit:
-            warnings.append(f"Capacity market but unit is {fact.unit}, expected $/kW-month")
+        # Validate units match price field type
+        if fact.market_type == "ENERGY":
+            if fact.price_energy is not None and "$/MWh" not in fact.unit:
+                warnings.append(f"Energy market but unit is {fact.unit}, expected $/MWh")
+        elif fact.market_type == "CAPACITY":
+            if fact.price_capacity is not None and "$/kW-month" not in fact.unit:
+                warnings.append(f"Capacity market but unit is {fact.unit}, expected $/kW-month")
         
         # Validate capability period matches delivery month (if provided)
         if fact.capability_period:

@@ -24,6 +24,7 @@ from adapters.base import ISOAdapter
 from canonical.schemas import MarketPriceFact
 from canonical.normalize import normalize_capacity_price
 from canonical.temporal_utils import datetime_to_yyyymm, get_capability_period, get_delivery_months_for_strip, yyyymm_to_datetime
+from config.url_constants import NYISO_ICAP_BASE_URL
 
 
 class NYISOCapacityAdapter(ISOAdapter):
@@ -36,7 +37,11 @@ class NYISOCapacityAdapter(ISOAdapter):
     - Spot auction results (rare)
     """
     
-    BASE_URL = "https://icappublic.nyiso.com/ucap/public"
+    # BASE_URL is kept for backward compatibility but actual URL should
+    # be obtained from url_registry / url constants. New code should prefer
+    # NYISO_ICAP_BASE_URL from config.url_constants, which itself is seeded
+    # into url_registry.
+    BASE_URL = NYISO_ICAP_BASE_URL
     
     # ICAP zones (same as energy zones)
     ICAP_ZONES = [

@@ -8,7 +8,8 @@ from typing import Optional, List
 from adapters.base import ISOAdapter
 from storage.parquet_writer import ParquetWriter
 from storage.duckdb_views import DuckDBViews
-from run_pipeline import SQLITE_DB, DUCKDB_DB, DIRS, log_ingestion
+from run_pipeline import SQLITE_DB, DUCKDB_DB, DIRS, log_ingestion, log_data_source
+from config.url_constants import NYISO_ICAP_BASE_URL
 
 
 def run_capacity_pipeline(
@@ -105,6 +106,13 @@ def run_capacity_pipeline(
             rows=len(facts),
             start_time=start_time,
             end_time=end_time,
+        )
+        
+        # Log data source (NYISO ICAP portal URL)
+        log_data_source(
+            dataset_name=dataset_name,
+            source_url=NYISO_ICAP_BASE_URL,
+            iso_code=iso_code,
         )
         
         return {
@@ -244,7 +252,9 @@ def import_capacity_from_excel(
         Dictionary with import results
     """
     iso_code = adapter.get_iso_code()
-    dataset_name = f"capacity_excel_{iso_code.lower()}"
+    # Make dataset_name specific per Excel file for easier debugging/metadata inspection
+    # Example: capacity_excel_nyiso_ICAP_Market_Report_December_2023
+    dataset_name = f"capacity_excel_{iso_code.lower()}_{excel_file_path.stem.replace(' ', '_')}"
     
     # Track start time
     start_time = datetime.utcnow()
@@ -318,6 +328,13 @@ def import_capacity_from_excel(
             rows=len(facts),
             start_time=start_time,
             end_time=end_time,
+        )
+        
+        # Log data source (Excel file path)
+        log_data_source(
+            dataset_name=dataset_name,
+            source_url=str(excel_file_path.absolute()),
+            iso_code=iso_code,
         )
         
         return {

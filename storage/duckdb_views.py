@@ -69,6 +69,7 @@ class DuckDBViews:
         """)
         
         # Create view by ISO
+        # Use COALESCE to handle both old schema (price) and new schema (price_energy)
         self.con.execute("""
             CREATE OR REPLACE VIEW energy_prices_by_iso AS
             SELECT 
@@ -77,7 +78,7 @@ class DuckDBViews:
                 zone,
                 start_time,
                 end_time,
-                price,
+                COALESCE(price_energy, price) as price,
                 unit
             FROM energy_prices
             ORDER BY iso_code, start_time
@@ -130,8 +131,14 @@ class DuckDBViews:
             except Exception as e2:
                 print(f"Warning: Could not create market_prices view: {e2}")
     
-    def refresh_views(self):
-        """Refresh all views by dropping and recreating them."""
+    def update_view_definitions(self):
+        """
+        Update DuckDB view definitions to match current Parquet file schema.
+        
+        IMPORTANT: This does NOT delete or modify any Parquet files!
+        It only updates the SQL view definitions (queries) that read from Parquet files.
+        Your data in data/parquet/ is safe and accumulates over time.
+        """
         # Drop all existing views first to handle schema evolution
         views_to_drop = [
             'market_prices',
@@ -156,10 +163,38 @@ class DuckDBViews:
             print("No Parquet files found - creating empty views")
             self._create_empty_views()
         else:
-            # Recreate all views
-            self.create_energy_views()
-            self.create_capacity_views()
-            self.create_unified_view()
+            # Recreate all views from Parquet files
+            try:
+                self.create_energy_views()
+                self.create_capacity_views()
+                self.create_unified_view()
+                
+                # Verify the view actually has data and can be queried
+                # Don't check for specific columns - union_by_name handles schema evolution
+                try:
+                    row_count = self.con.execute("SELECT COUNT(*) FROM market_prices").fetchone()[0]
+                    if row_count == 0:
+                        print("Warning: View created but contains no data. This may be normal if Parquet files are empty.")
+                    else:
+                        print(f"✓ View created successfully with {row_count} rows")
+                except Exception as e:
+                    print(f"Warning: Could not query view: {e}")
+                    # Only recreate empty views if there's an actual error querying
+                    # Don't recreate just because schema doesn't match expectations
+            except Exception as e:
+                print(f"Error creating views from Parquet files: {e}")
+                print("Creating empty views as fallback...")
+                self._create_empty_views()
+    
+    def refresh_views(self):
+        """
+        Alias for update_view_definitions() for backward compatibility.
+        
+        DEPRECATED: Use update_view_definitions() instead.
+        This method name is misleading - it doesn't "refresh" data, it updates SQL view definitions.
+        Your Parquet files are never touched by this method.
+        """
+        return self.update_view_definitions()
     
     def _create_empty_views(self):
         """Create empty views when no Parquet files exist."""
@@ -169,7 +204,7 @@ class DuckDBViews:
         # First, try to get schema from a sample file if one exists
         # Otherwise, use a minimal schema
         try:
-            # Create a minimal empty view structure
+            # Create a minimal empty view structure with all fields from MarketPriceFact schema
             self.con.execute("""
                 CREATE OR REPLACE VIEW market_prices AS
                 SELECT 
@@ -185,8 +220,13 @@ class DuckDBViews:
                     CAST(NULL AS VARCHAR) as delivery_month,
                     CAST(NULL AS VARCHAR) as capability_period,
                     CAST(NULL AS VARCHAR) as auction_type,
+                    CAST(NULL AS DOUBLE) as price_energy,
+                    CAST(NULL AS DOUBLE) as price_capacity,
                     CAST(NULL AS DOUBLE) as price,
                     CAST(NULL AS VARCHAR) as unit,
+                    CAST(NULL AS DOUBLE) as awarded_mw,
+                    CAST(NULL AS TIMESTAMP) as posted_at,
+                    CAST(NULL AS VARCHAR) as season_id,
                     CAST(NULL AS VARCHAR) as zone_normalized,
                     CAST(NULL AS VARCHAR) as zone_original,
                     CAST(NULL AS DOUBLE) as data_quality_score,
@@ -221,7 +261,7 @@ class DuckDBViews:
                     zone,
                     start_time,
                     end_time,
-                    price,
+                    COALESCE(price_energy, price) as price,
                     unit
                 FROM energy_prices
                 ORDER BY iso_code, start_time

@@ -162,7 +162,7 @@ class ISODataAdapter:
                     node_id,
                     zone,
                     delivery_month,
-                    price
+                    price_capacity as price
                 FROM market_prices
                 WHERE iso_code = '{self.iso_code}'
                   AND market_type = '{market_type}'
@@ -176,7 +176,7 @@ class ISODataAdapter:
                     node_id,
                     zone,
                     start_time,
-                    price
+                    price_energy as price
                 FROM market_prices
                 WHERE iso_code = '{self.iso_code}'
                   AND market_type = '{market_type}'
@@ -288,6 +288,7 @@ class ISODataAdapter:
         metric_name = self._get_metric_name(market_type)
         
         # Ensure we have required columns
+        # For ENERGY, we need price_energy (aliased as price in query)
         required_cols = ['start_time', 'zone', 'price']
         missing = [col for col in required_cols if col not in df.columns]
         if missing:

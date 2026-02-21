@@ -28,6 +28,24 @@ print("=" * 80)
 
 con = duckdb.connect(str(DUCKDB_PATH))
 
+# Refresh views to handle schema changes (old price vs new price_energy/price_capacity)
+from storage.duckdb_views import DuckDBViews
+views = DuckDBViews(DUCKDB_PATH, PARQUET_BASE)
+views.refresh_views()
+# Verify the view has all required columns
+try:
+    test_df = con.execute("SELECT * FROM market_prices LIMIT 0").df()
+    required_cols = ['awarded_mw', 'posted_at', 'season_id', 'price_energy', 'price_capacity', 'price']
+    missing = [col for col in required_cols if col not in test_df.columns]
+    if missing:
+        print(f"Warning: View missing columns: {missing}")
+        # Force recreate
+        views._create_empty_views()
+except Exception as e:
+    print(f"Warning: Could not verify view: {e}")
+views.close()
+print("✓ DuckDB views refreshed")
+
 # ============================================================================
 # SECTION A: CAPACITY DATA QUERIES
 # ============================================================================
@@ -47,7 +65,7 @@ SELECT
     delivery_month,
     capability_period,
     auction_type,
-    price,
+    COALESCE(price_capacity, price) as price,
     unit,
     awarded_mw,
     posted_at,
@@ -68,9 +86,9 @@ query_a2 = """
 SELECT 
     zone,
     COUNT(*) as record_count,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
-    AVG(price) as avg_price,
+    MIN(COALESCE(price_capacity, price)) as min_price,
+    MAX(COALESCE(price_capacity, price)) as max_price,
+    AVG(COALESCE(price_capacity, price)) as avg_price,
     SUM(awarded_mw) as total_awarded_mw
 FROM market_prices
 WHERE market_type = 'CAPACITY'
@@ -87,7 +105,7 @@ print("-" * 80)
 query_a3 = """
 SELECT 
     delivery_month,
-    price,
+    COALESCE(price_capacity, price) as price,
     awarded_mw,
     auction_month
 FROM market_prices
@@ -105,12 +123,12 @@ print("-" * 80)
 query_a4 = """
 SELECT 
     zone,
-    MAX(CASE WHEN delivery_month = '202311' THEN price END) as Nov_2023,
-    MAX(CASE WHEN delivery_month = '202312' THEN price END) as Dec_2023,
-    MAX(CASE WHEN delivery_month = '202401' THEN price END) as Jan_2024,
-    MAX(CASE WHEN delivery_month = '202402' THEN price END) as Feb_2024,
-    MAX(CASE WHEN delivery_month = '202403' THEN price END) as Mar_2024,
-    MAX(CASE WHEN delivery_month = '202404' THEN price END) as Apr_2024
+    MAX(CASE WHEN delivery_month = '202311' THEN COALESCE(price_capacity, price) END) as Nov_2023,
+    MAX(CASE WHEN delivery_month = '202312' THEN COALESCE(price_capacity, price) END) as Dec_2023,
+    MAX(CASE WHEN delivery_month = '202401' THEN COALESCE(price_capacity, price) END) as Jan_2024,
+    MAX(CASE WHEN delivery_month = '202402' THEN COALESCE(price_capacity, price) END) as Feb_2024,
+    MAX(CASE WHEN delivery_month = '202403' THEN COALESCE(price_capacity, price) END) as Mar_2024,
+    MAX(CASE WHEN delivery_month = '202404' THEN COALESCE(price_capacity, price) END) as Apr_2024
 FROM market_prices
 WHERE market_type = 'CAPACITY'
   AND delivery_month IN ('202311', '202312', '202401', '202402', '202403', '202404')
@@ -128,9 +146,9 @@ SELECT
     zone,
     capability_period,
     COUNT(*) as record_count,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
-    AVG(price) as avg_price,
+    MIN(COALESCE(price_capacity, price)) as min_price,
+    MAX(COALESCE(price_capacity, price)) as max_price,
+    AVG(COALESCE(price_capacity, price)) as avg_price,
     SUM(awarded_mw) as total_awarded_mw,
     MIN(delivery_month) as first_delivery_month,
     MAX(delivery_month) as last_delivery_month
@@ -155,9 +173,9 @@ SELECT
     zone,
     auction_type,
     COUNT(*) as record_count,
-    AVG(price) as avg_price,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
+    AVG(COALESCE(price_capacity, price)) as avg_price,
+    MIN(COALESCE(price_capacity, price)) as min_price,
+    MAX(COALESCE(price_capacity, price)) as max_price,
     AVG(awarded_mw) as avg_awarded_mw
 FROM market_prices
 WHERE market_type = 'CAPACITY'
@@ -178,7 +196,7 @@ print("-" * 80)
 query_a7 = """
 SELECT 
     delivery_month,
-    price,
+    COALESCE(price_capacity, price) as price,
     awarded_mw,
     auction_month,
     capability_period
@@ -204,9 +222,9 @@ SELECT
     COUNT(*) as total_records,
     COUNT(DISTINCT zone) as zone_count,
     COUNT(DISTINCT delivery_month) as delivery_month_count,
-    AVG(price) as avg_price,
-    MIN(price) as min_price,
-    MAX(price) as max_price
+    AVG(COALESCE(price_capacity, price)) as avg_price,
+    MIN(COALESCE(price_capacity, price)) as min_price,
+    MAX(COALESCE(price_capacity, price)) as max_price
 FROM market_prices
 WHERE market_type = 'CAPACITY'
   AND delivery_month IN ('202311', '202312', '202401', '202402', '202403', '202404')
@@ -218,6 +236,143 @@ if len(df_a8) > 0:
     print(df_a8.to_string(index=False))
 else:
     print("No capacity auction data found")
+
+# Query A9: Excel-imported data summary
+print("\n\nA9. Excel-Imported Capacity Data Summary:")
+print("-" * 80)
+query_a9 = """
+SELECT 
+    CASE 
+        WHEN source_url LIKE '%.xlsx' OR source_url LIKE '%.xls' OR source_url LIKE '%excel%' OR source_url LIKE '%Excel%' 
+        THEN 'Excel Import'
+        WHEN source_url LIKE 'http%' 
+        THEN 'HTML Scraping'
+        ELSE 'Unknown'
+    END as source_type,
+    COUNT(*) as total_records,
+    COUNT(DISTINCT zone) as zone_count,
+    COUNT(DISTINCT delivery_month) as delivery_month_count,
+    COUNT(DISTINCT auction_type) as auction_types,
+    MIN(delivery_month) as earliest_month,
+    MAX(delivery_month) as latest_month
+FROM market_prices
+WHERE market_type = 'CAPACITY'
+  AND iso_code = 'NYISO'
+GROUP BY source_type
+ORDER BY source_type
+"""
+df_a9 = con.execute(query_a9).df()
+if len(df_a9) > 0:
+    print(df_a9.to_string(index=False))
+else:
+    print("No capacity data found")
+
+# Query A10: Excel-imported data by auction type
+print("\n\nA10. Excel-Imported Data by Auction Type:")
+print("-" * 80)
+query_a10 = """
+SELECT 
+    auction_type,
+    COUNT(*) as total_records,
+    COUNT(DISTINCT zone) as zone_count,
+    COUNT(DISTINCT delivery_month) as delivery_month_count,
+    AVG(COALESCE(price_capacity, price)) as avg_price,
+    MIN(COALESCE(price_capacity, price)) as min_price,
+    MAX(COALESCE(price_capacity, price)) as max_price,
+    MIN(delivery_month) as earliest_month,
+    MAX(delivery_month) as latest_month
+FROM market_prices
+WHERE market_type = 'CAPACITY'
+  AND iso_code = 'NYISO'
+  AND (source_url LIKE '%.xlsx' OR source_url LIKE '%.xls' OR source_url LIKE '%excel%' OR source_url LIKE '%Excel%')
+GROUP BY auction_type
+ORDER BY auction_type
+"""
+df_a10 = con.execute(query_a10).df()
+if len(df_a10) > 0:
+    print(df_a10.to_string(index=False))
+else:
+    print("No Excel-imported capacity data found")
+
+# Query A11: Excel-imported data by zone
+print("\n\nA11. Excel-Imported Data by Zone:")
+print("-" * 80)
+query_a11 = """
+SELECT 
+    zone,
+    auction_type,
+    COUNT(*) as record_count,
+    AVG(COALESCE(price_capacity, price)) as avg_price,
+    MIN(COALESCE(price_capacity, price)) as min_price,
+    MAX(COALESCE(price_capacity, price)) as max_price,
+    MIN(delivery_month) as earliest_month,
+    MAX(delivery_month) as latest_month
+FROM market_prices
+WHERE market_type = 'CAPACITY'
+  AND iso_code = 'NYISO'
+  AND (source_url LIKE '%.xlsx' OR source_url LIKE '%.xls' OR source_url LIKE '%excel%' OR source_url LIKE '%Excel%')
+GROUP BY zone, auction_type
+ORDER BY zone, auction_type
+"""
+df_a11 = con.execute(query_a11).df()
+if len(df_a11) > 0:
+    print(df_a11.to_string(index=False))
+else:
+    print("No Excel-imported capacity data found")
+
+# Query A12: Sample Excel-imported records
+print("\n\nA12. Sample Excel-Imported Records:")
+print("-" * 80)
+query_a12 = """
+SELECT 
+    zone,
+    delivery_month,
+    auction_type,
+    COALESCE(price_capacity, price) as price,
+    awarded_mw,
+    capability_period,
+    SUBSTR(source_url, -50) as source_file
+FROM market_prices
+WHERE market_type = 'CAPACITY'
+  AND iso_code = 'NYISO'
+  AND (source_url LIKE '%.xlsx' OR source_url LIKE '%.xls' OR source_url LIKE '%excel%' OR source_url LIKE '%Excel%')
+ORDER BY delivery_month DESC, zone
+LIMIT 20
+"""
+df_a12 = con.execute(query_a12).df()
+if len(df_a12) > 0:
+    print(df_a12.to_string(index=False))
+else:
+    print("No Excel-imported capacity data found")
+
+# Query A13: Excel vs HTML data comparison
+print("\n\nA13. Excel vs HTML Data Comparison (by Zone):")
+print("-" * 80)
+query_a13 = """
+SELECT 
+    zone,
+    CASE 
+        WHEN source_url LIKE '%.xlsx' OR source_url LIKE '%.xls' OR source_url LIKE '%excel%' OR source_url LIKE '%Excel%' 
+        THEN 'Excel'
+        WHEN source_url LIKE 'http%' 
+        THEN 'HTML'
+        ELSE 'Unknown'
+    END as source_type,
+    COUNT(*) as record_count,
+    AVG(COALESCE(price_capacity, price)) as avg_price,
+    MIN(delivery_month) as earliest_month,
+    MAX(delivery_month) as latest_month
+FROM market_prices
+WHERE market_type = 'CAPACITY'
+  AND iso_code = 'NYISO'
+GROUP BY zone, source_type
+ORDER BY zone, source_type
+"""
+df_a13 = con.execute(query_a13).df()
+if len(df_a13) > 0:
+    print(df_a13.to_string(index=False))
+else:
+    print("No capacity data found")
 
 # ============================================================================
 # SECTION B: ENERGY DATA QUERIES
@@ -237,7 +392,7 @@ SELECT
     start_time,
     end_time,
     product,
-    price,
+    COALESCE(price_energy, price) as price,
     unit
 FROM market_prices
 WHERE market_type = 'ENERGY'
@@ -260,9 +415,9 @@ SELECT
     zone,
     product,
     COUNT(*) as record_count,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
-    AVG(price) as avg_price,
+    MIN(COALESCE(price_energy, price)) as min_price,
+    MAX(COALESCE(price_energy, price)) as max_price,
+    AVG(COALESCE(price_energy, price)) as avg_price,
     MIN(start_time) as earliest_time,
     MAX(start_time) as latest_time
 FROM market_prices
@@ -283,7 +438,7 @@ print("-" * 80)
 query_b3 = """
 SELECT 
     start_time,
-    price,
+    COALESCE(price_energy, price) as price,
     zone,
     product
 FROM market_prices
@@ -308,10 +463,10 @@ SELECT
     product,
     COUNT(*) as record_count,
     COUNT(DISTINCT zone) as zone_count,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
-    AVG(price) as avg_price,
-    STDDEV(price) as stddev_price
+    MIN(COALESCE(price_energy, price)) as min_price,
+    MAX(COALESCE(price_energy, price)) as max_price,
+    AVG(COALESCE(price_energy, price)) as avg_price,
+    STDDEV(COALESCE(price_energy, price)) as stddev_price
 FROM market_prices
 WHERE market_type = 'ENERGY'
   AND iso_code = 'NYISO'
@@ -330,9 +485,9 @@ print("-" * 80)
 query_b5 = """
 SELECT 
     DATE(start_time) as date,
-    AVG(price) as avg_price,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
+    AVG(COALESCE(price_energy, price)) as avg_price,
+    MIN(COALESCE(price_energy, price)) as min_price,
+    MAX(COALESCE(price_energy, price)) as max_price,
     COUNT(*) as hour_count
 FROM market_prices
 WHERE market_type = 'ENERGY'
@@ -384,7 +539,11 @@ SELECT
     market_type,
     zone,
     COUNT(*) as record_count,
-    AVG(price) as avg_price
+    AVG(CASE 
+        WHEN market_type = 'ENERGY' THEN COALESCE(price_energy, price)
+        ELSE COALESCE(price_capacity, price)
+    END) as avg_price,
+    MAX(unit) as unit
 FROM market_prices
 WHERE iso_code = 'NYISO'
 GROUP BY market_type, zone
@@ -400,9 +559,19 @@ query_c3 = """
 SELECT 
     market_type,
     product,
-    AVG(price) as avg_price,
-    MIN(price) as min_price,
-    MAX(price) as max_price,
+    AVG(CASE 
+        WHEN market_type = 'ENERGY' THEN COALESCE(price_energy, price)
+        ELSE COALESCE(price_capacity, price)
+    END) as avg_price,
+    MIN(CASE 
+        WHEN market_type = 'ENERGY' THEN COALESCE(price_energy, price)
+        ELSE COALESCE(price_capacity, price)
+    END) as min_price,
+    MAX(CASE 
+        WHEN market_type = 'ENERGY' THEN COALESCE(price_energy, price)
+        ELSE COALESCE(price_capacity, price)
+    END) as max_price,
+    MAX(unit) as unit,
     COUNT(*) as record_count
 FROM market_prices
 WHERE iso_code = 'NYISO'
@@ -493,26 +662,26 @@ queries = {
         ORDER BY delivery_month, zone
     """,
     "Capacity: NYC prices only": """
-        SELECT delivery_month, price, awarded_mw, auction_type
+        SELECT delivery_month, COALESCE(price_capacity, price) as price, awarded_mw, auction_type
         FROM market_prices 
         WHERE market_type = 'CAPACITY' AND zone = 'NYC'
         ORDER BY delivery_month, auction_type
     """,
     "Capacity: Average price by zone": """
-        SELECT zone, AVG(price) as avg_price 
+        SELECT zone, AVG(COALESCE(price_capacity, price)) as avg_price 
         FROM market_prices 
         WHERE market_type = 'CAPACITY'
         GROUP BY zone
         ORDER BY avg_price DESC
     """,
     "Capacity: Strip auction data": """
-        SELECT zone, delivery_month, price, awarded_mw, capability_period
+        SELECT zone, delivery_month, COALESCE(price_capacity, price) as price, awarded_mw, capability_period
         FROM market_prices 
         WHERE market_type = 'CAPACITY' AND auction_type = 'STRIP'
         ORDER BY delivery_month, zone
     """,
     "Capacity: MONTHLY vs STRIP comparison": """
-        SELECT zone, auction_type, AVG(price) as avg_price, COUNT(*) as records
+        SELECT zone, auction_type, AVG(COALESCE(price_capacity, price)) as avg_price, COUNT(*) as records
         FROM market_prices 
         WHERE market_type = 'CAPACITY' AND auction_type IN ('MONTHLY', 'STRIP')
         GROUP BY zone, auction_type
@@ -526,7 +695,7 @@ queries = {
         ORDER BY start_time DESC
     """,
     "Energy: NYC Day-Ahead prices": """
-        SELECT start_time, price, zone 
+        SELECT start_time, COALESCE(price_energy, price) as price, zone 
         FROM market_prices 
         WHERE market_type = 'ENERGY' 
           AND zone = 'NYC' 
@@ -534,14 +703,14 @@ queries = {
         ORDER BY start_time DESC
     """,
     "Energy: Average price by zone": """
-        SELECT zone, product, AVG(price) as avg_price 
+        SELECT zone, product, AVG(COALESCE(price_energy, price)) as avg_price 
         FROM market_prices 
         WHERE market_type = 'ENERGY'
         GROUP BY zone, product
         ORDER BY zone, product
     """,
     "Energy: Daily averages": """
-        SELECT DATE(start_time) as date, AVG(price) as avg_price
+        SELECT DATE(start_time) as date, AVG(COALESCE(price_energy, price)) as avg_price
         FROM market_prices 
         WHERE market_type = 'ENERGY' AND zone = 'NYC'
         GROUP BY DATE(start_time)

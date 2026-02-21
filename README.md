@@ -237,18 +237,52 @@ python C:\path\to\pipeline\run_pipeline.py --energy --iso NYISO --product DA
 
 ## Phase Status
 
-- ✅ **Phase 1**: Foundation & Storage
-- ✅ **Phase 2**: NYISO Energy Prices
-- 🔄 **Phase 3**: NYISO ICAP (Capacity Market) - IN PROGRESS
-  - ✅ Monthly auction HTML scraping
-  - ✅ Strip auction HTML scraping
-  - ✅ ROS data parsing
-  - ✅ Excel historical data import
-  - ⏳ Spot auction support (moved to Phase 7 - low priority)
-- ⏳ **Phase 4**: Analytics + Jupyter Frontend + PUDL Integration
-- ⏳ **Phase 5**: Additional ISOs (PJM, ISO-NE, MISO, CAISO, ERCOT, SPP)
-- ⏳ **Phase 6**: Natural Language Search (Qdrant + OpenAI)
-- ⏳ **Phase 7**: Spot Auction Support (low priority - rare events)
+### ✅ **Phase 1**: Foundation & Storage
+- Directory structure and Parquet partitioning
+- SQLite metadata database
+- DuckDB analytics database
+- Canonical schema (`MarketPriceFact`)
+- Data validation and normalization
+
+### ✅ **Phase 2**: NYISO Energy Prices
+- Day-ahead and real-time energy market data
+- NYISOToolkit integration
+- Backfill capabilities
+- Zone normalization
+
+### ✅ **Phase 3**: NYISO ICAP (Capacity Market) - **COMPLETE**
+- ✅ Monthly auction HTML scraping
+- ✅ Strip auction HTML scraping
+- ✅ ROS data parsing
+- ✅ Excel historical data import (download + parsing)
+  - Automated Excel file downloader (Selenium-based)
+  - MCP Table parsing
+  - Monthly/Strip/Spot details parsing
+  - Batch processing support
+- ⏳ Spot auction HTML scraping (moved to Phase 7 - low priority)
+
+### ⏳ **Phase 4**: Analytics + Jupyter Frontend + PUDL Integration
+- Enhanced visualizations with PUDL-derived fields
+- Jupyter notebooks for interactive analysis
+- PUDL adapter for complementary data (state/BA level)
+- Advanced charting and analysis tools
+
+### ⏳ **Phase 5**: Additional ISOs
+- PJM capacity and energy markets
+- ISO-NE capacity and energy markets
+- MISO capacity and energy markets
+- CAISO capacity and energy markets
+- ERCOT capacity and energy markets
+- SPP capacity and energy markets
+
+### ⏳ **Phase 6**: Natural Language Search
+- Qdrant vector database integration
+- OpenAI embeddings for semantic search
+- Natural language query interface
+
+### ⏳ **Phase 7**: Spot Auction Support (low priority)
+- Spot auction HTML scraping (rare events, 1-2 times in NYISO history)
+- Spot auction Excel parsing (already supported in Excel import)
 
 ## Supported ISOs
 
